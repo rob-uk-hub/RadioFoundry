@@ -165,6 +165,18 @@ typedef struct {
 	uint8_t (*tx_queue_space)(void);
 	void (*tx_end)(void);		// send what is queued, then DMR_EV_TX_DONE
 	void (*tx_abort)(void);
+	// Optional hotspot MS mode (MMDVM_CONFIG_MS): our slot on a repeater's two timeslots. ms_begin waits for a BS-synced
+	// burst, aligns to it and keys (never before), then per slot ms_queue holds the bursts in order; MS of one slot may
+	// be followed by the other's, and each goes out
+	// only in its own slot. ms_end sends what is queued, then DMR_EV_TX_DONE; ms_space(ts) is free bursts on that
+	// slot. lc is the embedded LC for a voice A (NULL: none). All NULL: use the standard one-burst path, and refuse
+	// SET_CONFIG when that is absent too
+	bool (*ms_begin)(dmr_access_t access);
+	bool (*ms_queue)(int8_t ts, const dmr_tx_burst_t *b, const uint8_t lc[9]);
+	uint8_t (*ms_space)(int8_t ts);
+	void (*ms_end)(void);
+	void (*ms_abort)(void);
+	bool (*ms_keyed)(void);
 	void (*set_embedded_lc)(const uint8_t lc[9]);	// spread over B-E from the next superframe
 	// The receive filter: -1 = any, else the configured code (the call layer passes nothing else, so a driver that
 	// writes it to the chip's one CC register leaves the TX code as configured). configure() keeps any-CC listening:

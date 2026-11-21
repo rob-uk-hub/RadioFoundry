@@ -15,6 +15,7 @@ static radio_hs_post_fn post_fn;
 static volatile bool hs_active;		// published: the radio is in hotspot mode
 static volatile bool hs_carrier;	// published: hotspot carrier
 static volatile int16_t hs_rssi;	// published: the last status poll's RSSI (dBm)
+static volatile uint32_t hs_dmr_id;	// published: the radio's configured DMR ID (codeplug)
 static volatile uint32_t hs_serial;
 static uint32_t orphan_ms;		// hotspot mode without a running hotspot since, 0 = not
 // CW ID handover: written by the cw_id op (host link task) only while cw_busy is false, read by the radio task
@@ -29,6 +30,7 @@ void radio_hs_init(radio_hs_post_fn post)
 	hs_active = false;
 	hs_carrier = false;
 	hs_rssi = 0;
+	hs_dmr_id = 0;
 	orphan_ms = 0;
 	cw_len = 0;
 	cw_pending = false;
@@ -48,6 +50,7 @@ void radio_hs_publish(const radio_sm_t *sm)
 	hs_active = sm->hotspot;
 #if CONFIG_DMR
 	hs_carrier = sm->hs_carrier;
+	hs_dmr_id = sm->own_id;
 #endif
 	hs_rssi = sm->view.rssi_dbm;
 #if CONFIG_SFR
@@ -94,6 +97,11 @@ static bool hs_enter(uint32_t rx_hz)
 static bool hs_is_active(void)
 {
 	return hs_active;
+}
+
+static uint32_t hs_dmr_id_fn(void)
+{
+	return hs_dmr_id;
 }
 
 static bool hs_set_freq(uint32_t rx_hz, uint32_t tx_hz)
@@ -192,7 +200,8 @@ void radio_hs_cw_get_stats(radio_hs_cw_stats_t *out)
 }
 
 const hotspot_radio_ops_t radio_hs_ops = {
-	.enter = hs_enter, .active = hs_is_active, .set_freq = hs_set_freq, .set_power = hs_set_power, .leave = hs_leave,
+	.enter = hs_enter, .active = hs_is_active, .dmr_id = hs_dmr_id_fn, .set_freq = hs_set_freq,
+	.set_power = hs_set_power, .leave = hs_leave,
 	.carrier = hs_carrier_fn, .changed = hs_changed, .rssi_dbm = hs_rssi_fn,
 	.cw_id = hs_cw_id, .cw_busy = hs_cw_busy,	// keyed by the radio task (radio_sm.c cw_*), on boards with tx_tone
 };

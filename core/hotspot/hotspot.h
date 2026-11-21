@@ -37,6 +37,8 @@ typedef struct {
 	// handled (a radio whose retune waits for its synthesizer) has finished since: the engine tries again at once,
 	// instead of HOTSPOT_ENTER_RETRY_MS after the last try (a host's first commands, such as SEND_CWID, find it running)
 	bool (*active)(void);
+	// Optional: the radio's configured DMR ID (codeplug), for a repeater wake-up's CSBK source. 0 = none
+	uint32_t (*dmr_id)(void);
 	// Tune for the hotspot: receive on rx_hz, transmit on tx_hz (simplex: equal). Called with the modem idle.
 	// Hotspot frequencies may lie outside the amateur bands (docs/spec/gotchas.md 8.7): only the board's band
 	// limits apply. False if out of range (the host gets a NAK). A few register writes; must not block for long
@@ -80,8 +82,12 @@ bool hotspot_start(uint32_t now_ms);
 void hotspot_stop(void);
 bool hotspot_running(void);
 
-// SET_CONFIG: color code, simplex flag (MMDVMHost Duplex=0) and the TX delay (ms)
-void hotspot_config(uint8_t cc, bool simplex, uint16_t tx_delay_ms);
+// SET_CONFIG: color code, simplex flag (MMDVMHost Duplex=0), hotspot MS mode (MMDVM_CONFIG_MS) and the TX delay (ms)
+void hotspot_config(uint8_t cc, bool simplex, bool is_ms_mode, uint16_t tx_delay_ms);
+// The last SET_CONFIG asked for hotspot MS mode (a mobile station on a repeater, both slots)
+bool hotspot_ms_mode(void);
+// The modem can send MS bursts: the MS outbound path (hal_dmr_modem_t.ms_begin ...), or the standard one-burst TX
+bool hotspot_ms_supported(void);
 // SET_FREQ: drops anything in flight (the host should wait for idle first, docs/spec/gotchas.md 8.6); an uplink call
 // that was open gets its DMR_LOST2 first, and nothing heard before the retune goes up after it. False: refused
 bool hotspot_set_freq(uint32_t rx_hz, uint32_t tx_hz, uint8_t rf_level);
@@ -114,27 +120,36 @@ typedef struct {
 	void (*net_abort)(void);
 	bool (*transmitting)(void);
 	void (*stopped)(void);		// the modem is being given back, or retuned: drop everything, inactive
+	uint8_t (*space)(int8_t ts);	// optional: DMR frames the host may still send on slot 1 / 2
 #if CONFIG_HOTSPOT_SPLIT
 	// Optional: event() with the event's arg (DMR_EV_BURST_RX: the slot counter it was heard in), called instead
 	void (*event_arg)(uint8_t kind, const dmr_burst_t *burst, uint32_t arg, uint32_t now_ms);
 #endif
 } hotspot_alt_t;
 void hotspot_set_alt(const hotspot_alt_t *alt);
+#if CONFIG_HOTSPOT_MS
+// Hotspot MS mode (MMDVM_CONFIG_MS) ahead of the standard hotspot: while active it gets the modem's events and both
+// slots' DMR frames. It yields to an active split duplex role (CONFIG_HOTSPOT_SPLIT).
+void hotspot_set_alt_ms(const hotspot_alt_t *alt);
+// The standard host data list and the MS host queue share one buffer; when MS stops the list starts empty
+void hotspot_alt_data_reset(void);
+#endif
 #if CONFIG_HOTSPOT_SPLIT
 // A second other mode ahead of the first (the split duplex roles, core/hotspot/hotspotSplit.c): while it is active it
 // gets everything above, and the first is stopped and not polled
 void hotspot_set_alt_priority(const hotspot_alt_t *alt);
-// The second RSSI byte after an uplink burst (the AT1846S raw scale, docs/spec/mmdvm-protocol.md 5.4); false: unknown
-bool hotspot_rssi_byte(int16_t rssi_dbm, uint8_t *raw);
 // A cap on SET_FREQ's RF level (the split duplex TX half's power cap); 0 or 255: none
 void hotspot_set_power_cap(uint8_t cap);
 #endif
+// The second RSSI byte after an uplink burst (the AT1846S raw scale, docs/spec/mmdvm-protocol.md 5.4); false: unknown
+bool hotspot_rssi_byte(int16_t rssi_dbm, uint8_t *raw);
 bool hotspot_alt_active(void);
 // A DMR_DATA1 / DMR_DATA2 frame while the other mode is active: 0 if taken, else the MMDVM NAK reason
 uint8_t hotspot_alt_net_frame(uint8_t command, uint8_t control, const uint8_t *frame, uint32_t now_ms);
 // The simplex engine drops what it has (a call going up gets its DMR_LOST2), before the other mode takes over
 void hotspot_alt_takeover(void);
 const hal_dmr_modem_t *hotspot_modem(void);
+uint32_t hotspot_dmr_id(void);	// the radio's configured DMR ID, 0 if none
 uint8_t hotspot_color_code(void);
 // A host frame for the other mode: the control byte it should have had (hotspotNetFrameControl) and the voice bits
 uint8_t hotspot_frame_control(uint8_t control, const uint8_t *frame);
@@ -148,6 +163,8 @@ void hotspot_up_data(uint8_t command, uint8_t data_type, const uint8_t *info, ui
 void hotspot_up_lost(uint8_t command);	// DMR_LOST1 / DMR_LOST2
 
 // ---- Status for GET_STATUS ----
+uint8_t hotspot_space_slot(int8_t ts);	// DMR frames the host may still send on slot 1 / 2 (hotspot MS mode: per slot,
+					// or the one shared queue on the software outbound path)
 uint8_t hotspot_space(void);		// DMR frames the host may still send (the smaller of voice buffer and data list,
 					// less a margin for frames already on their way, docs/spec/mmdvm-protocol.md 2.4)
 bool hotspot_transmitting(void);	// from buffering until the last burst is on air, data queued and CW ID included

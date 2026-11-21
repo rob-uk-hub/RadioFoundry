@@ -242,7 +242,8 @@ static void get_status(void)
 	uint8_t n = MMDVM_STATUS_BASE_LEN - 3;
 	uint8_t flags = 0;
 	bool dmr = hotspot_running() && (modes & MMDVM_MODE_BIT_DMR);
-	uint8_t slot1 = 0, slot2 = dmr ? hotspot_space() : 0;
+	uint8_t slot1 = dmr ? hotspot_space_slot(1) : 0;
+	uint8_t slot2 = dmr ? hotspot_space_slot(2) : 0;
 
 	memset(p, 0, sizeof(p));
 	if (hotspot_transmitting()) {
@@ -275,7 +276,7 @@ static void get_status(void)
 	p[1] = state;
 	p[2] = flags;
 	p[4] = slot1;		// DMR slot 1: 0 in simplex (the spec allows 0 or 10; the host then never writes DATA1)
-	p[5] = slot2;		// DMR slot 2: frames the host may send
+	p[5] = slot2;		// DMR slot 2: frames the host may send (both in hotspot MS mode)
 	p[9] = 0;		// POCSAG space: 0, the host never writes pages (spec 2.6)
 	if ((EXT != NULL) && (EXT->status_extra != NULL)) {
 		n = (uint8_t)(n + EXT->status_extra(p + n, MMDVM_STATUS_EXTRA_MAX));
@@ -297,11 +298,17 @@ static void set_config(const uint8_t *p, uint8_t len)
 		nak(MMDVM_SET_CONFIG, MMDVM_NAK_INVALID);	// color code
 		return;
 	}
-	simplex = (p[0] & MMDVM_CONFIG_SIMPLEX) != 0;
+	bool ms = (p[0] & MMDVM_CONFIG_MS) != 0;
+
+	if (ms && !hotspot_ms_supported()) {
+		nak(MMDVM_SET_CONFIG, MMDVM_NAK_WRONG_MODE);	// this radio's modem has no MS outbound path
+		return;
+	}
+	simplex = !ms && ((p[0] & MMDVM_CONFIG_SIMPLEX) != 0);
 	modes = p[1] & MODES_KNOWN;	// other modes asked for are simply not enabled
 	state = p[3];
 	hotspot_set_uplink(state != MMDVM_MODE_POCSAG);
-	hotspot_config(p[6], simplex, (uint16_t)(p[2] * 10));
+	hotspot_config(p[6], simplex, ms, (uint16_t)(p[2] * 10));
 	if ((EXT != NULL) && (EXT->config_changed != NULL)) {
 		EXT->config_changed(simplex, rx_hz, tx_hz);
 	}

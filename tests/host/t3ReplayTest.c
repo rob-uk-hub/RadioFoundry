@@ -60,9 +60,9 @@ static struct {
 static void man_path(char *out, const char *rel)
 {
 	if (rel[0] == '/') {
-		snprintf(out, 512, "%s", rel);
+		snprintf(out, 512, "%.*s", 511, rel);
 	} else {
-		snprintf(out, 512, "%s/%s", man.dir, rel);
+		snprintf(out, 512, "%.*s/%.*s", 255, man.dir, 255, rel);
 	}
 }
 

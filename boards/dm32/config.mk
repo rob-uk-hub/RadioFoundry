@@ -2,10 +2,12 @@
 # Copyright (c) 2026 The RadioFoundry Authors
 # DM-32UV feature defaults (config/features.mk lists them all). 880 KB of code space before the codec slot, so RAM is
 # the limit: 211,456 B below the codec's RAM window (boards/dm32/memory.ld, docs/spec/hardware-dm32.md 17.1), the
-# RTOS heap's 33 KB among them (freertos_board.h). Every feature the radio has hardware and glue for is on, and the
-# image (P25, P25 trunking and NXDN among them) keeps about 2.4 KB of it free: a feature that needs more RAM cuts some first, or shrinks the heap if
-# tasks.heap_min_free shows room (tests/hil/test_task_stacks.py). The codec's encoder and decoder share one state block
-# (platform/hrc7000/vocoder.c), which P25 borrows while it runs
+# RTOS heap's 33 KB among them (freertos_board.h). Every feature the radio has hardware and glue for is on, except the
+# opt-in hotspot MS mode (CONFIG_HOTSPOT_MS), and the image (P25, P25 trunking and NXDN among them) keeps about 2.4 KB
+# of it free. With CONFIG_HOTSPOT_MS=y its host queue shares the hotspot's packet-data buffer (core/hotspot/hotspot.c)
+# and the image keeps about 1 KB. A feature that needs more RAM cuts some first, or shrinks the heap if
+# tasks.heap_min_free shows room (tests/hil/test_task_stacks.py). The codec's encoder and decoder share one
+# state block (platform/hrc7000/vocoder.c), which P25 borrows while it runs
 # The host link runs on the programming cable's UART0; USB, PPP and TCP_CONNS follow the platform
 # (platform/hrc7000/config.mk)
 # The 240x320 panel at full resolution in 16 colors (display_dm32.c, board.mk). The 16x32 font is the large class's

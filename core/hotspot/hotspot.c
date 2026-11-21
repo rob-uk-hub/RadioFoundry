@@ -6,6 +6,9 @@
 #include "hotspot/mmdvm.h"
 #include "hotspot/hotspotUplink.h"
 #include "hotspot/hotspotData.h"
+#if CONFIG_HOTSPOT_MS
+#include "hotspot/hotspotMs.h"
+#endif
 #include "hotspot/dmrDataFrame.h"
 #include "dmr/dmrData.h"
 #include "dmr/fec/dmrFec.h"
@@ -50,6 +53,7 @@ static bool enter_tried;		// enter() was refused at enter_ms: wait HOTSPOT_ENTER
 static uint32_t enter_ms;
 
 static uint8_t cc = 1;
+static bool ms_mode;		// SET_CONFIG asked for hotspot MS mode (a mobile station on a repeater)
 static uint32_t rx_hz, tx_hz;
 static uint8_t rf_level = 255;
 
@@ -63,8 +67,19 @@ static bool enq_open;			// a call from the host is open on the queue side (no te
 static uint8_t enq_lc[LC_LEN];
 static uint8_t enq_index;		// last voice burst index queued
 static uint8_t cur_lc[LC_LEN];		// the call on air
-// Not in CCM RAM with the other big buffers: the data service's bursts (one transmission's worth) took the room there
-static dmrBurst_t data_store[DMR_DATA_MAX_BURSTS];
+// Not in CCM RAM with the other big buffers: the data service's bursts (one transmission's worth) took the room there.
+// Hotspot MS mode borrows this buffer for its host queue while the standard data path is idle: hotspot_poll() skips
+// the list below while an alt mode is active, and the MS queue is idle otherwise, so one buffer serves both.
+#if CONFIG_HOTSPOT_MS
+static union {
+	dmrBurst_t data[DMR_DATA_MAX_BURSTS];
+	hotspotMsItem_t ms[DMR_DATA_MAX_BURSTS];
+} store;
+#else
+static struct {
+	dmrBurst_t data[DMR_DATA_MAX_BURSTS];
+} store;
+#endif
 static const dmrBurst_t *data_list;
 static int data_count, data_next;
 static bool data_done;
@@ -89,16 +104,20 @@ static hotspot_view_t view;
 static hotspot_stats_t stats;
 
 static const hotspot_alt_t *alt;	// another mode on the modem (the SFR), when built in
+static const hotspot_alt_t *alt_ms;	// hotspot MS mode (MMDVM_CONFIG_MS), when built in
 
 #if CONFIG_HOTSPOT_SPLIT
 static const hotspot_alt_t *alt_prio;	// ... and one ahead of it (the split duplex roles)
 static uint8_t power_cap = 255;		// the split duplex TX half's cap on the RF level
 
-// The other mode active now, the priority one first
+// The other mode active now: a split role (an explicit vendor request), then hotspot MS mode, then the SFR
 static const hotspot_alt_t *alt_cur(void)
 {
 	if (running && (alt_prio != NULL) && alt_prio->active()) {
 		return alt_prio;
+	}
+	if (running && (alt_ms != NULL) && alt_ms->active()) {
+		return alt_ms;
 	}
 	return alt;
 }
@@ -117,11 +136,21 @@ static uint8_t level_capped(uint8_t level)
 #define ALT		(alt_cur())
 #define LEVEL(l)	(level_capped(l))
 #else
+static const hotspot_alt_t *alt_cur(void)
+{
+	if (running && (alt_ms != NULL) && alt_ms->active()) {
+		return alt_ms;
+	}
+	return alt;
+}
+
 static bool alt_on(void)
 {
-	return (alt != NULL) && running && alt->active();
+	const hotspot_alt_t *a = alt_cur();
+
+	return (a != NULL) && running && a->active();
 }
-#define ALT		alt
+#define ALT		(alt_cur())
 #define LEVEL(l)	(l)
 #endif
 
@@ -286,6 +315,13 @@ void hotspot_set_alt(const hotspot_alt_t *a)
 	alt = a;
 }
 
+#if CONFIG_HOTSPOT_MS
+void hotspot_set_alt_ms(const hotspot_alt_t *a)
+{
+	alt_ms = a;
+}
+#endif
+
 bool hotspot_alt_active(void)
 {
 	return alt_on();
@@ -314,15 +350,26 @@ void hotspot_set_power_cap(uint8_t cap)
 	}
 }
 
+#endif
+
 bool hotspot_rssi_byte(int16_t rssi_dbm, uint8_t *raw)
 {
 	return rssi_raw(rssi_dbm, raw);
 }
-#endif
 
 const hal_dmr_modem_t *hotspot_modem(void)
 {
 	return modem;
+}
+
+static uint32_t radio_dmr_id(void)
+{
+	return ((radio != NULL) && (radio->dmr_id != NULL)) ? (radio->dmr_id() & 0xFFFFFFu) : 0;
+}
+
+uint32_t hotspot_dmr_id(void)
+{
+	return radio_dmr_id();
 }
 
 uint8_t hotspot_color_code(void)
@@ -397,8 +444,21 @@ static void reset_tx(void)
 	data_count = 0;
 	data_next = 0;
 	data_done = false;
-	hotspotDataReset(data_store);
+	hotspotDataReset(store.data);
 }
+
+#if CONFIG_HOTSPOT_MS
+hotspotMsItem_t *hotspot_ms_storage(void)
+{
+	return store.ms;
+}
+
+// Hotspot MS mode shares the buffer above with the standard data list; when it stops the list starts empty
+void hotspot_alt_data_reset(void)
+{
+	hotspotDataReset(store.data);
+}
+#endif
 
 static void reset_uplink(void)
 {
@@ -451,10 +511,10 @@ void hotspot_init(const hal_dmr_modem_t *m, hotspot_send_fn send)
 static dmr_config_t modem_config(void)
 {
 	dmr_config_t c = {
-		.own_id = 0,			// the hotspot passes every call
+		.own_id = ms_mode ? radio_dmr_id() : 0,	// the hotspot passes every call; MS wakes a repeater as ours
 		.cc = (int8_t)cc,
 		.access = DMR_ACCESS_IMPOLITE,	// the host does its own listen-before-talk (carrier detect)
-		.repeater = false,		// simplex, DMO framing
+		.repeater = ms_mode,		// simplex DMO, or a mobile station on a repeater
 	};
 	return c;
 }
@@ -503,6 +563,7 @@ void hotspot_stop(void)
 {
 	enter_tried = false;	// a new session tries at once
 	uplink_on = true;
+	ms_mode = false;	// a new session starts as the standard hotspot
 	if (!running) {
 		return;
 	}
@@ -511,6 +572,9 @@ void hotspot_stop(void)
 		alt_prio->stopped();
 	}
 #endif
+	if (alt_ms != NULL) {
+		alt_ms->stopped();
+	}
 	if (alt != NULL) {
 		alt->stopped();
 	}
@@ -533,18 +597,45 @@ bool hotspot_running(void)
 	return running;
 }
 
-void hotspot_config(uint8_t color_code, bool is_simplex, uint16_t tx_delay_ms)
+void hotspot_config(uint8_t color_code, bool is_simplex, bool is_ms_mode, uint16_t tx_delay_ms)
 {
 	(void)tx_delay_ms;	// the modem keys from its own slot timing
-	cc = color_code & 0x0F;
-	(void)is_simplex;	// this engine is simplex only: duplex + RX = TX selects the SFR where it is built (hotspotSfr.c,
-				// through mmdvm_ext_t)
+	uint8_t new_cc = color_code & 0x0F;
+	bool mode_changed = (is_ms_mode != ms_mode) || (new_cc != cc);
+
+	cc = new_cc;
+	ms_mode = is_ms_mode;
+	(void)is_simplex;	// the duplex flag selects the SFR where it is built (hotspotSfr.c, through mmdvm_ext_t)
 	view.cc = cc;
 	if (running) {
+		if (mode_changed) {
+			if (alt_ms != NULL) {
+				alt_ms->stopped();	// hotspot MS mode and the SFR are exclusive
+			}
+			if ((alt != NULL) && alt->active()) {
+				alt->stopped();
+			}
+		}
 		dmr_config_t c = modem_config();
 		modem->configure(&c);
 		modem->set_cc_filter((int8_t)cc);
 	}
+}
+
+bool hotspot_ms_mode(void)
+{
+	return ms_mode;
+}
+
+bool hotspot_ms_supported(void)
+{
+#if CONFIG_HOTSPOT_MS
+	// The MS engine can also serialize bursts through the standard TX path, one key-up per burst
+	return (modem != NULL) && (modem->tx_begin != NULL) && (modem->tx_queue != NULL) &&
+	       (modem->tx_end != NULL) && (modem->tx_abort != NULL);
+#else
+	return false;
+#endif
 }
 
 bool hotspot_set_freq(uint32_t rx, uint32_t tx, uint8_t level)
@@ -556,6 +647,9 @@ bool hotspot_set_freq(uint32_t rx, uint32_t tx, uint8_t level)
 			alt_prio->stopped();	// a split role stays: its slot clock restarts (a new epoch)
 		}
 #endif
+		if (alt_ms != NULL) {
+			alt_ms->stopped();
+		}
 		if (alt != NULL) {
 			alt->stopped();		// the other mode is chosen again after the ACK (config_changed)
 		}
@@ -738,7 +832,7 @@ void hotspot_net_idle(void)
 	ring_head = 0;
 	ring_count = 0;
 	enq_open = false;
-	hotspotDataReset(data_store);
+	hotspotDataReset(store.data);
 	if (st == TX_VOICE) {
 		push_lc(DMR_BURST_TERMINATOR_LC, cur_lc);	// feed() queues it and ends the transmission
 	} else if (st == TX_DATA) {
@@ -1105,6 +1199,17 @@ void hotspot_poll(uint32_t now_ms)
 		}
 	}
 #endif
+	if (alt_ms != NULL) {
+		alt_ms->poll(now_ms);
+		if (alt_ms->active()) {
+			if ((alt != NULL) && alt->active()) {
+				alt->stopped();		// hotspot MS mode keeps the SFR off
+			}
+			view.transmitting = hotspot_transmitting();
+			view.receiving = hotspot_carrier();
+			return;
+		}
+	}
 	if (alt != NULL) {
 		alt->poll(now_ms);
 		if (alt_on()) {
@@ -1127,6 +1232,14 @@ void hotspot_poll(uint32_t now_ms)
 }
 
 // ---- Status ----
+
+uint8_t hotspot_space_slot(int8_t ts)
+{
+	if (alt_on() && (ALT->space != NULL)) {
+		return ALT->space(ts);
+	}
+	return (ts == 1) ? 0 : hotspot_space();
+}
 
 uint8_t hotspot_space(void)
 {

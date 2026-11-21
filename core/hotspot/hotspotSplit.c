@@ -8,6 +8,7 @@
 #include "hotspot/hotspot.h"
 #include "hotspot/mmdvm.h"
 #include "hotspot/hotspotUplink.h"
+#include "hotspot/hotspotSlot.h"
 #include "hotspot/dmrDataFrame.h"
 #include "dmr/dmrData.h"
 #include "dmr/fec/dmrFec.h"
@@ -16,16 +17,6 @@
 
 #define LC_LEN		9
 #define SLOT_US		30000u
-
-typedef struct {
-	hotspotUplink_t up;
-	uint8_t sf_frag[4][4];		// the embedded LC fragments of B-E for the superframe going up
-	uint8_t alias_lc[LC_LEN];	// a talker alias / GPS embedded LC heard: sent in the next superframe
-	bool alias_pending;
-	uint32_t last_ms;		// last burst heard on this slot
-	uint32_t data_ms;		// last data burst heard
-	bool heard;
-} rx_slot_t;
 
 // A scheduled burst (spec 3.9), held until its slot is handed to the driver
 typedef struct {
@@ -98,7 +89,7 @@ static struct {
 
 	// RX half
 	slotEpoch_t ep;
-	rx_slot_t rx[2];
+	hotspotSlot_t rx[2];
 	uint16_t labeled[2], unlabeled;
 	uint8_t options;		// SET_ROLE byte 7
 	uint16_t meta_seq;		// RX_META events sent
@@ -464,7 +455,7 @@ static uint8_t inbound_busy(void)
 		return 0;
 	}
 	for (int i = 0; i < 2; i++) {
-		rx_slot_t *r = &sp.rx[i];
+		hotspotSlot_t *r = &sp.rx[i];
 
 		if (hotspotUplinkCallOpen(&r->up) ||
 		    (r->heard && ((uint32_t)(sp.now_ms - r->data_ms) < SPLIT_BUSY_DATA_MS) && (r->data_ms != 0))) {
@@ -892,77 +883,14 @@ static void tx_short_lc(const uint8_t *p, uint8_t len)
 
 // ---- RX half ----
 
-static uint8_t up_cmd(int k, bool lost)
-{
-	if (lost) {
-		return (k == 0) ? MMDVM_DMR_LOST1 : MMDVM_DMR_LOST2;
-	}
-	return (k == 0) ? MMDVM_DMR_DATA1 : MMDVM_DMR_DATA2;
-}
-
-static void rx_lost(int k)
-{
-	hotspot_up_lost(up_cmd(k, true));
-	sp.rx[k].alias_pending = false;
-}
-
 static void rx_reset(void)
 {
 	for (int k = 0; k < 2; k++) {
 		if (hotspotUplinkCallOpen(&sp.rx[k].up)) {
-			rx_lost(k);
+			hotspotSlotLost(&sp.rx[k], k);
 		}
-		memset(&sp.rx[k], 0, sizeof(sp.rx[k]));
-		hotspotUplinkReset(&sp.rx[k].up);
+		hotspotSlotReset(&sp.rx[k]);
 	}
-}
-
-static const uint8_t MS_VOICE_SYNC[6] = { 0x7F, 0x7D, 0x5D, 0xD5, 0x7D, 0xFD };
-
-// A voice burst up, as the simplex uplink frames it (mmdvm-protocol.md 2.8) with this slot's own embedded LC
-static void rx_voice(int k, const uint8_t *voice, uint8_t index, int16_t rssi_dbm, bool heard)
-{
-	rx_slot_t *r = &sp.rx[k];
-	uint8_t frame[MMDVM_DMR_FRAME_LEN];
-	uint8_t middle[6] = { 0, 0, 0, 0, 0, 0 };
-	uint8_t payload[1 + MMDVM_DMR_FRAME_LEN + 2];
-	uint8_t len = 1 + MMDVM_DMR_FRAME_LEN;
-	uint8_t raw;
-
-	if (index == 0) {
-		dmr_emb_lc_encode(r->alias_pending ? r->alias_lc : hotspotUplinkLc(&r->up), r->sf_frag);
-		r->alias_pending = false;
-		memcpy(middle, MS_VOICE_SYNC, 6);
-	} else {
-		uint16_t emb = dmrFecEmbEncode(hotspot_color_code(), false, dmr_emb_lcss(index));
-
-		middle[0] = (uint8_t)(emb >> 8);
-		if (index <= 4) {
-			memcpy(middle + 1, r->sf_frag[index - 1], 4);
-		}
-		middle[5] = (uint8_t)emb;
-	}
-	memcpy(frame, voice, 13);
-	frame[13] = (uint8_t)((voice[13] & 0xF0) | (middle[0] >> 4));
-	for (int i = 0; i < 5; i++) {
-		frame[14 + i] = (uint8_t)((middle[i] << 4) | (middle[i + 1] >> 4));
-	}
-	frame[19] = (uint8_t)((middle[5] << 4) | (voice[13] & 0x0F));
-	memcpy(frame + 20, voice + 14, 13);
-
-	payload[0] = (index == 0) ? MMDVM_DMR_SYNC_AUDIO : index;
-	memcpy(payload + 1, frame, MMDVM_DMR_FRAME_LEN);
-	if (heard && hotspot_rssi_byte(rssi_dbm, &raw)) {
-		payload[len++] = 0;
-		payload[len++] = raw;
-	}
-	mmdvm_send(up_cmd(k, false), payload, len);
-}
-
-static bool data_with_crc(uint8_t kind)
-{
-	return (kind == DMR_BURST_PI_HEADER) || (kind == DMR_BURST_CSBK) || (kind == DMR_BURST_MBC_HEADER) ||
-	       (kind == DMR_BURST_DATA_HEADER);
 }
 
 // RX_META (spec 3.10): what the RX half knows of one burst, sent before its uplink frames
@@ -1029,86 +957,13 @@ static void rx_burst(const dmr_burst_t *b, uint32_t arg, uint32_t now_ms)
 			slotEpochTrack(&sp.ep, res);
 		}
 	}
-	int k = label - 1;
-	rx_slot_t *r = &sp.rx[k];
-	hotspotUplinkBurst_t u;
-	uint8_t fill = 0;
-
-	r->last_ms = now_ms;
-	r->heard = true;
-	memset(&u, 0, sizeof(u));
-	u.ms = now_ms;
-	switch (b->kind) {
-	case DMR_BURST_VOICE:
-		u.kind = HOTSPOT_UPLINK_VOICE;
-		u.seq = b->voice_index;
-		u.flags = (uint8_t)((b->lc_valid ? HOTSPOT_UPLINK_FLAG_LC_VALID : 0) |
-				    (((b->voice_index == 0) || b->crc_ok) ? HOTSPOT_UPLINK_FLAG_SYNC_OK : 0));
-		memcpy(u.lc, b->lc, LC_LEN);
-		memcpy(u.ambe, b->payload, HOTSPOT_UPLINK_AMBE_LENGTH);
-		if (b->lc_valid) {
-			uint8_t flco = b->lc[0] & 0x3F;
-
-			if ((flco >= DMR_FLCO_TA_HEADER) && (flco <= DMR_FLCO_GPS)) {
-				memcpy(r->alias_lc, b->lc, LC_LEN);
-				r->alias_pending = true;
-			}
-		}
-		break;
-	case DMR_BURST_VOICE_LC_HEADER:
-	case DMR_BURST_TERMINATOR_LC:
-		if (!b->crc_ok) {
-			return;
-		}
-		u.kind = (b->kind == DMR_BURST_VOICE_LC_HEADER) ? HOTSPOT_UPLINK_HEADER : HOTSPOT_UPLINK_TERMINATOR;
-		u.flags = HOTSPOT_UPLINK_FLAG_LC_VALID;
-		memcpy(u.lc, b->lc_valid ? b->lc : b->payload, LC_LEN);
-		break;
-	default:
-		if ((b->kind > DMR_BURST_RATE_1_DATA) || (b->kind == DMR_BURST_IDLE)) {
-			return;
-		}
-		if (data_with_crc(b->kind) && !b->crc_ok) {
-			return;
-		}
-		r->data_ms = now_ms;
-		if (hotspotUplinkData(&r->up, b->kind, now_ms)) {
-			hotspot_up_data(up_cmd(k, false), b->kind, b->payload, b->len, (b->rssi_dbm != 0) ? b->rssi_dbm : 0);
-		}
-		return;
-	}
-
-	uint8_t actions = hotspotUplinkBurst(&r->up, &u, &fill);
-	const uint8_t *lc = hotspotUplinkLc(&r->up);
-
-	if (actions & HOTSPOT_UP_LOST) {
-		rx_lost(k);
-	}
-	if (actions & HOTSPOT_UP_HEADER) {
-		hotspot_up_lc(up_cmd(k, false), DMR_TYPE_VOICE_LC_HEADER, lc,
-			      (b->kind == DMR_BURST_VOICE_LC_HEADER) ? b->rssi_dbm : 0);
-		dmr_emb_lc_encode(lc, r->sf_frag);
-	}
-	if (actions & HOTSPOT_UP_FILL) {
-		for (uint8_t i = fill, n = 0; (i != u.seq) && (n < 6); i = (uint8_t)((i + 1) % 6), n++) {
-			rx_voice(k, HOTSPOT_UPLINK_SILENCE, i, 0, false);
-		}
-	}
-	if (actions & HOTSPOT_UP_VOICE) {
-		rx_voice(k, u.ambe, u.seq, b->rssi_dbm, true);
-	}
-	if (actions & HOTSPOT_UP_TERMINATOR) {
-		hotspot_up_lc(up_cmd(k, false), DMR_TYPE_TERMINATOR_LC, lc, b->rssi_dbm);
-		r->alias_pending = false;
-	}
+	hotspotSlotBurst(&sp.rx[label - 1], label - 1, b, now_ms);
 }
 
 static void rx_poll(uint32_t now_ms)
 {
 	for (int k = 0; k < 2; k++) {
-		if (hotspotUplinkLost(&sp.rx[k].up, now_ms)) {
-			rx_lost(k);
-		}
+		hotspotSlotPoll(&sp.rx[k], k, now_ms);
 	}
 }
 
@@ -1435,7 +1290,7 @@ static uint8_t tx_sched(const uint8_t *p, uint8_t len, uint8_t *data, uint8_t *r
 		sp.sch_refused++;
 	} else {
 		dmr_tx_burst_t b;
-		const uint8_t *lc;
+		const uint8_t *lc = NULL;
 		uint8_t r = net_burst(ts_of_counter(g), p[5], p + 6, &b, &lc);
 
 		if ((r != 0) && (r != NET_SKIP)) {

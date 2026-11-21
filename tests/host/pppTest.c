@@ -52,7 +52,7 @@ static size_t port_write(const uint8_t *b, size_t n)
 static bool port_true(void) { return true; }
 static size_t port_read(uint8_t *b, size_t n) { (void)b; (void)n; return 0; }
 static bool port_wait(uint32_t t) { (void)t; return false; }
-static const hal_stream_t port = { port_true, port_true, port_read, port_wait, port_write };
+static const hal_stream_t port = { port_true, port_true, port_read, port_wait, port_write, NULL };
 const board_t board = { .name = "fake", .host_port = &port, .netif = &hostlink_ppp_netif };
 
 bool ipGatewaySendFrame(const uint8_t *f, int length) { return board.netif->send(f, length); }
@@ -360,7 +360,9 @@ static int udp(uint8_t *p, uint32_t src, uint32_t dst, uint16_t sport, uint16_t 
 static void test_fcs(void)
 {
 	// The FCS-16 check value (CRC-16/X-25 of "123456789"): the peer's table is right
-	CHECK((uint16_t)~fcs(0xFFFF, (const uint8_t *)"123456789", 9) == 0x906E);
+	uint16_t got = (uint16_t)~fcs(0xFFFF, (const uint8_t *)"123456789", 9);
+
+	CHECK(got == 0x906E);
 }
 
 static void test_negotiation(void)

@@ -298,6 +298,11 @@ switch = "HOTSPOT"
 spec = "docs/spec/mmdvm-protocol.md"
 source = ["core/hotspot", "core/hostlink", "docs/spec/mmdvm-protocol.md"]
 
+[feature.hotspot_ms]
+switch = "HOTSPOT_MS"
+spec = "docs/spec/mmdvm-protocol.md"
+source = ["core/hotspot", "core/hostlink", "core/radio/radio_hotspot.c", "core/radio/radio_hotspot.h"]
+
 [feature.split_duplex]
 switch = "HOTSPOT_SPLIT"
 spec = "docs/spec/split-duplex.md"

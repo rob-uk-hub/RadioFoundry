@@ -85,6 +85,9 @@
 
 // SET_CONFIG (protocol 1) payload: [0] flags, [1] modes enabled, [2] TX delay / 10 ms, [3] state, [4] RX level,
 // [5] CW ID level, [6] DMR color code, [7] DMR delay, [8] oscillator offset, [10] DMR TX level, ...
+// MMDVM_CONFIG_MS is the hotspot MS mode flag in byte 0: the modem is a mobile station on a repeater, receiving both
+// timeslots and transmitting on either. It takes precedence over MMDVM_CONFIG_SIMPLEX.
+#define MMDVM_CONFIG_MS		0x40	// flags: hotspot MS mode: a mobile station on a repeater, both slots
 #define MMDVM_CONFIG_SIMPLEX	0x80	// flags: Duplex=0
 #define MMDVM_MODE_BIT_DMR	0x02	// modes enabled / GET_STATUS byte 3
 #define MMDVM_MODE_BIT_POCSAG	0x20

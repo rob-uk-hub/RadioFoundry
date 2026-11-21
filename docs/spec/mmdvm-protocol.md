@@ -57,8 +57,8 @@ up to the next 0xE0.
 | 09 | RSSI_DATA | (calibration) | NAK | no |
 | 0A | SEND_CWID | host to modem | ACK when accepted, NAK 5 when not idle | only with CW ID enabled |
 | 17 | DMR_ALOHA | host to modem, trunking only | NAK 2 or silence | no |
-| 18 | DMR_DATA1 | both | none on success, NAK on refusal | duplex / SFR only |
-| 19 | DMR_LOST1 | modem to host | (none) | duplex / SFR only |
+| 18 | DMR_DATA1 | both | none on success, NAK on refusal | duplex / SFR / hotspot MS mode |
+| 19 | DMR_LOST1 | modem to host | (none) | duplex / SFR / hotspot MS mode |
 | 1A | DMR_DATA2 | both | none or ACK on success, NAK on refusal | yes |
 | 1B | DMR_LOST2 | modem to host | (none) | yes |
 | 1C | DMR_SHORTLC | host to modem | none, or ACK; never NAK in simplex | sent on every call, simplex too |
@@ -88,7 +88,7 @@ the bench tools drop ACKs). Pick one and keep it; ACKing costs 4 bytes per 60 ms
 | Reason | Meaning |
 | --- | --- |
 | 1 | unknown command |
-| 2 | wrong mode: the mode isn't enabled, or the command doesn't apply now (other digital modes, DMR_DATA1 in plain simplex, SFR not on) |
+| 2 | wrong mode: the mode isn't enabled, or the command doesn't apply now (other digital modes, DMR_DATA1 in plain simplex, SFR not on, hotspot MS mode without an outbound TX path) |
 | 3 | (unused by the hosts; "too long" in our numbering) |
 | 4 | invalid: bad length, bad value (color code above 15, unknown state, TX delay out of range), a burst type the radio can't send, a frequency the radio can't tune |
 | 5 | no space (TX buffer full); also SEND_CWID while not idle |
@@ -203,7 +203,7 @@ more; the bench tools send 23):
 
 | Payload offset | Content | DMR-only radio |
 | --- | --- | --- |
-| 0 | flags: 10 debug (the host wants DEBUG frames), 80 simplex | must honor 80 (simplex / duplex, section 3.6 and SFR); 10 gates DEBUG frames; ignore the other bits |
+| 0 | flags: 10 debug (the host wants DEBUG frames), 40 hotspot MS mode (user of another repeater), 80 simplex | must honor 40 and 80 (40 wins); 10 gates DEBUG frames; ignore the other bits |
 | 1 | modes enabled: 02 DMR, 20 POCSAG | honor 02; ignore the others, never NAK for them |
 | 2 | TX delay, 10 ms units | Accept 0-255 and clamp; may use it as the key-up lead time |
 | 3 | modem state to enter: 00 idle (a standard host sends 00), 02 DMR (the bench tools send 02), 06 POCSAG | accept 00, 02, 06; NAK 4 for others |
@@ -212,9 +212,10 @@ more; the bench tools send 23):
 
 **Protocol 2 payload** (37 bytes, frame length 28): not used by RadioFoundry. Payload byte 25 carries the DMR flags (80 trunking).
 
-Effects to apply: color code (RX acceptance and TX framing), simplex / duplex, the state byte (as SET_MODE would),
-debug flag. SET_CONFIG must not reset a transmission in progress unless the color code or duplex flag changed. In SFR
-builds, re-evaluate the SFR trigger after it (section 6).
+Effects to apply: color code (RX acceptance and TX framing), simplex / duplex / hotspot MS mode, the state byte (as
+SET_MODE would), debug flag. SET_CONFIG must not reset a transmission in progress unless the color code or mode flag
+changed. In SFR builds, re-evaluate the SFR trigger after it (section 6). A hotspot MS mode request when the modem has no
+outbound TX path is NAK 2 (a standard host can then try plain simplex).
 
 ### 2.6 SET_MODE (03)
 
@@ -458,9 +459,36 @@ headers, as far as space allows) and then at the network rate, about one frame p
 - No DMR_START, no DMR_ABORT, short LC ignored, no CACH.
 - After the host's terminator, the TX flag stays set until the radio's own terminator is on air (about 0.7 s after
   the host's terminator, measured, gotchas 8.6), then clears.
-- SET_CONFIG with the simplex flag clear and RX ≠ TX: a standard host then expects a duplex repeater (both slots, DMR_START,
-  BS framing). RadioFoundry runs as a plain simplex hotspot in that case; with RX = TX it turns SFR on
-  (section 6).
+- SET_CONFIG with the simplex flag clear, hotspot MS mode clear and RX ≠ TX: a standard host then expects a duplex repeater
+  (both slots, DMR_START, BS framing). RadioFoundry runs as a plain simplex hotspot in that case; with RX = TX it turns
+  SFR on (section 6).
+
+### 3.6.1 Hotspot MS mode (MMDVM_CONFIG_MS)
+
+SET_CONFIG flag 40 sets hotspot MS mode: a mobile station on a repeater, not a hotspot. It wins over 80 and changes
+both slots. The wake-up CSBK's source is the radio's configured DMR ID (codeplug); SET_CONFIG has no DMR ID field.
+The mode is opt-in (`CONFIG_HOTSPOT_MS=y`); a build without it NAKs the request with reason 2.
+
+- RX is BS-sourced, on TS1 and TS2. The modem filters the configured color code and passes every supported burst up:
+  headers, voice A-F (late entry included), terminators, CSBKs, data headers and blocks. `DMR_DATA1`/`DMR_DATA2` carry
+  the slot the burst was heard on; `DMR_LOST1`/`DMR_LOST2` follow the same 500 ms call watchdog as simplex.
+- TX accepts every DMR frame type on both slots. Per slot the host's order is kept; a frame goes out in its own slot
+  and with the configured color code. Idle bursts are ACKed and dropped; repeated terminators are ACKed and dropped.
+- A data list (a header and its blocks) is collected for up to 180 ms and sent in one key-up, so the receiver keeps the
+  call's slot timing. Its bursts are streamed from the host queue as the modem's queue drains, and the transmission
+  ends 180 ms after the last data frame; the host still gets each frame's space and ACK as it arrives.
+- Without BS sync, the first queued host frame sends a `BS_Dwn_Act` CSBK on own timing (`DMR_TIMING_OWN`), using the
+  radio's configured DMR ID as its source. It then waits up to 600 ms for a BS-synced burst, retries up to three
+  times, and sends no host frame until sync is heard. Frames sent meanwhile are ACKed and held. An MS outbound path
+  must also wait for BS sync before keying.
+- The modem keys itself. Boards with an MS outbound path use its per-slot queues. Otherwise the software path keeps
+  both slots' order in one host queue (one data list may fill it); each burst uses the standard one-slot TX path (one
+  key-up per burst), and the other slot's frames follow in order. A full queue is NAK 5.
+- DMR_START and DMR_ABORT do not apply; ACK or ignore them. DMR_SHORTLC is accepted and ignored.
+- Split duplex roles take priority: when one is active hotspot MS mode is off until it ends. SFR never runs in
+  hotspot MS mode.
+- GET_STATUS reports the real space of both slots (slot 1 is not the simplex constant 10); the software path reports
+  its one shared queue's free space on both.
 
 ### 3.7 Calls and "space" around back-to-back traffic
 

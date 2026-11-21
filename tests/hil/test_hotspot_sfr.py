@@ -125,7 +125,7 @@ def test_sfr_repeats_bench_call(radio, sdr_bench, pytestconfig):
         watch = sdr_bench.dmr_watch_start(None, freq, 12, cc)
         with radio.released() as port:
             t = M.Transport(port)
-            hs = M.MmdvmLink(t, hz, cc, rf_level, simplex=False)
+            hs = M.MmdvmLink(t, hz, hz, cc, rf_level, simplex=False)
             try:
                 mark = hs.mark()
                 sdr_bench.transmit(f"voice --src {src} --dst {tg} --superframes 3 --family ts1", freq, cc)

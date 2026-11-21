@@ -99,6 +99,7 @@ is `tools/bringup.py list --radio <id>`.
 | `usb` | ✕ | pass (seed) | ✕ | ✕ | not recorded | not recorded | not recorded | ✕ |
 | `hostlink` | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded |
 | `hotspot` | pass (seed) | pass (seed) | pass (seed) | pass (seed) | not recorded | not recorded | pass, needs re-run | off |
+| `hotspot_ms` | off | off | off | off | off | off | off | off |
 | `split_duplex` | pass (seed) | pass (seed) | pass (seed) | not written | not written | not recorded | partial, needs re-run | not written |
 | `debuglink` | pass (seed) | pass (seed) | pass (seed) | pass (seed) | pass (seed) | not recorded | pass | partial |
 | `task_stacks` | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | pass | pass |
@@ -231,6 +232,7 @@ clock`; ? = not known yet). No driver reads the clock yet ([radio-features.md](s
 | `NET_PPP` | ● | ○ | ● | ● | ○ | ○ | ○ | ○ |
 | `HOTSPOT` | ● | ● | ● | ● | ● | ● | ● | ○ |
 | `HOTSPOT_SPLIT` | ● | ● | ● | … | … | ● | ● | … |
+| `HOTSPOT_MS` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
 | `DEBUGLINK` | ● | ● | ● | ● | ● | ● | ● | ● |
 | `CPS_OPENFW` | ● | ● | ● | ● | ● | ● | ● | ● |
 | `CPS_FAST` | ● | ● | ● | ● | ● | ● | ● | ● |
@@ -363,7 +365,7 @@ clock`; ? = not known yet). No driver reads the clock yet ([radio-features.md](s
 |---|---|---:|---:|---|
 | USB device | `USB` | 127,300 | 87,848 | DM-32 has no USB (host link on the programming cable's UART). Includes everything on USB |
 | Host link: hotspot, CPS, debug link on the host port | `HOSTLINK` | 115,640 | 77,644 | Includes its children |
-| MMDVM hotspot | `HOTSPOT` | 34,196 | ~12,400 | Includes split duplex and MMDVM SFR where built. MD-380: size estimated |
+| MMDVM hotspot | `HOTSPOT` | 34,196 | ~12,400 | Includes split duplex, hotspot MS mode and MMDVM SFR where built. MD-380: size estimated |
 | Split duplex repeater (two radios, one duplex modem) | `HOTSPOT_SPLIT` | 12,584 | — | MD-380: HR_C6000-only glue. DM-1701, DM-32UV, DM-1801 Pro: each half checked alone on the SDR bench; one pair (DM-1801 Pro TX, DM-32UV RX) with a subscriber: 29 of 31 calls on the right slot |
 | Debug link | `DEBUGLINK` | 32,376 | 29,084 |  |
 | Task stacks in the debug link view | `TASK_STACKS` | 536 | 560 | Each task's least free stack, the `tasks` view section ([debuglink](spec/debuglink.md) 3.7) |

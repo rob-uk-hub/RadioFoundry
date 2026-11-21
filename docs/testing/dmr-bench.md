@@ -31,7 +31,7 @@ All in `tools/bench/`, MIT.
 | Tool | What |
 |---|---|
 | `bench_line.py` | Client of the bench line protocol. `bench_line.py HOST[:PORT] info` shows the board; `run bench_tx ARGS...` sends one job |
-| `mmdvm_hotspot.py` | The radio as an MMDVM modem over USB CDC (or the optional MMDVM UDP transport): configure simplex or SFR, poll status, log what it sends up; our extensions: command 0xD5 (SFR experiment switches) and the SFR counters at the end of GET_STATUS. Needs pyserial |
+| `mmdvm_hotspot.py` | The radio as an MMDVM modem over USB CDC (or the optional MMDVM UDP transport): configure simplex, SFR or hotspot MS mode, poll status, log what it sends up; our extensions: command 0xD5 (SFR experiment switches) and the SFR counters at the end of GET_STATUS. Needs pyserial |
 | `dmr_packet.py` | Reassembles the data packets in a listen job's JSON lines and decodes the IP in them |
 | `dmr_cach.py` | The CACH and short LC, from the standard |
 | `dmr_bench.py` | The DMR TX checks the HIL tests share (`check_tx`, `check_modem_calls`), their limits and a board's overrides |
@@ -98,5 +98,9 @@ call (`voice.rx_peak`, the radio's own over played back to it).
 ## 5. Hotspot and SFR
 
 `test_hotspot` covers the MMDVM protocol and `test_hotspot_sfr` the repeat on air. By hand: `mmdvm_hotspot.py --sfr`
-turns SFR on and logs what the radio sends up, and `mmdvm_hotspot.py --debug` sends our 0xD5 experiment switches and
-prints the SFR counters from GET_STATUS.
+turns SFR on and logs what the radio sends up, `mmdvm_hotspot.py --ms` runs hotspot MS mode (a mobile station on a
+repeater, both slots; the radio must be built with `CONFIG_HOTSPOT_MS=y`), and `mmdvm_hotspot.py --debug` sends our
+0xD5 experiment switches and prints the SFR counters from GET_STATUS.
+
+For an MS repeater split use `--rx` (the repeater's output) and `--tx` (its input); `--freq` sets both when neither is
+given, and `--sfr` requires them equal.

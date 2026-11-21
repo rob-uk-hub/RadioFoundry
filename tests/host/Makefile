@@ -886,12 +886,14 @@ run-rxchain: dmrRxChainTest dmrDataChainTest
 # The MMDVM protocol and the simplex hotspot engine (core/hotspot), against a fake DMR modem and radio core, and the
 # host link's rule for leaving hotspot mode (core/hostlink/hostlink_policy.c)
 MMDVM   := mmdvmTest.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c $(CORE)/hotspot/hotspotUplink.c \
+           $(CORE)/hotspot/hotspotMs.c $(CORE)/hotspot/hotspotSlot.c \
            $(CORE)/hotspot/hotspotData.c $(FRAME) $(CORE)/dmr/call/dmr_lc.c $(CORE)/hostlink/hostlink_policy.c \
            $(CORE)/radio/morse.c
+MMDVM_MS := -DCONFIG_HOTSPOT_MS=1	# the suite covers it; the firmware builds it only on request
 TESTS   += mmdvmTest
 
 mmdvmTest: $(MMDVM) $(wildcard $(CORE)/hotspot/*.h $(CORE)/hostlink/*.h $(CORE)/dmr/call/dmr_lc.h)
-	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -o $@ $(MMDVM)
+	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow $(MMDVM_MS) -o $@ $(MMDVM)
 
 run: run-mmdvm
 run-mmdvm: mmdvmTest
@@ -899,7 +901,7 @@ run-mmdvm: mmdvmTest
 
 # The hotspot's SFR mode (core/hotspot/hotspotSfr.c on core/dmr/sfrRunner.c and sfr.c) through mmdvm.c and hotspot.c,
 # against the simulated modem
-HSFR    := hotspotSfrTest.c $(CORE)/hotspot/hotspotSfr.c $(CORE)/dmr/sfrRunner.c $(CORE)/dmr/sfr.c \
+HSFR    := hotspotSfrTest.c $(CORE)/hotspot/hotspotSfr.c $(CORE)/hotspot/hotspotSlot.c $(CORE)/dmr/sfrRunner.c $(CORE)/dmr/sfr.c \
            $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c $(CORE)/hotspot/hotspotUplink.c $(CORE)/hotspot/hotspotData.c \
            $(FRAME) $(CORE)/dmr/call/dmr_lc.c sim/dmr_sim_modem.c $(CORE)/dmr/ambe/ambeFec.c
 TESTS   += hotspotSfrTest
@@ -918,7 +920,7 @@ run-hsfr: hotspotSfrTest
 # host that never sends 0xD6 can see changes but the version suffix)
 SPLITF  := -DCONFIG_HOTSPOT_SPLIT=1
 SPLIT   := $(CORE)/hotspot/hotspotSplit.c $(CORE)/dmr/bsOutbound.c $(CORE)/dmr/slotEpoch.c $(CORE)/dmr/fec/dmrCach.c
-SPLITT  := splitDuplexTest.c $(SPLIT) sim/split_sim_modem.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
+SPLITT  := splitDuplexTest.c $(SPLIT) $(CORE)/hotspot/hotspotSlot.c sim/split_sim_modem.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
            $(CORE)/hotspot/hotspotUplink.c $(CORE)/hotspot/hotspotData.c $(FRAME) $(CORE)/dmr/call/dmr_lc.c \
            $(CORE)/debuglink/debuglink_split.c $(CORE)/debuglink/dl_fmt.c
 TESTS   += splitDuplexTest mmdvmTestSplit hotspotSfrTestSplit hrc6000BsTest hrc6000DmrTestSplit
@@ -929,14 +931,14 @@ splitDuplexTest: $(SPLITT) $(SPLITH)
 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow $(SPLITF) -o $@ $(SPLITT)
 
 mmdvmTestSplit: $(MMDVM) $(SPLIT) $(SPLITH)
-	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow $(SPLITF) -o $@ $(MMDVM) $(SPLIT)
+	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow $(SPLITF) $(MMDVM_MS) -o $@ $(MMDVM) $(SPLIT)
 
 hotspotSfrTestSplit: $(HSFR) $(SPLIT) $(SPLITH)
 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DCONFIG_SFR=1 $(SPLITF) -o $@ $(HSFR) $(SPLIT)
 
 # The simulated pair (tests/host/splitPairTest.py): one radio per splitSim process, two in lockstep virtual time with
 # tools/split_duplex_host.py as the host; run when python3 is there
-SPLITSIM := sim/splitSim.c $(SPLIT) sim/split_sim_modem.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
+SPLITSIM := sim/splitSim.c $(SPLIT) $(CORE)/hotspot/hotspotSlot.c sim/split_sim_modem.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
             $(CORE)/hotspot/hotspotUplink.c $(CORE)/hotspot/hotspotData.c $(FRAME) $(CORE)/dmr/call/dmr_lc.c
 TESTS   += splitSim
 splitSim: $(SPLITSIM) $(SPLITH)

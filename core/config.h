@@ -136,6 +136,12 @@
 #ifndef CONFIG_HOTSPOT_SPLIT
 #define CONFIG_HOTSPOT_SPLIT		0
 #endif
+// Hotspot MS mode (MMDVM_CONFIG_MS): an MS on a repeater, both timeslots. Off by default; a build that wants it passes
+// -DCONFIG_HOTSPOT_MS=1 (config/features.mk: CONFIG_HOTSPOT_MS=y). Like CONFIG_HOTSPOT_SPLIT, every file of a program
+// must see the same value; host tests that want it pass -DCONFIG_HOTSPOT_MS=1 to all
+#ifndef CONFIG_HOTSPOT_MS
+#define CONFIG_HOTSPOT_MS		0
+#endif
 #ifndef CONFIG_DEBUGLINK
 #define CONFIG_DEBUGLINK		CONFIG_HOSTLINK
 #endif
@@ -433,6 +439,9 @@
 #endif
 #if CONFIG_HOTSPOT_SPLIT && !CONFIG_HOTSPOT
 #error "CONFIG_HOTSPOT_SPLIT needs CONFIG_HOTSPOT"
+#endif
+#if CONFIG_HOTSPOT_MS && !CONFIG_HOTSPOT
+#error "CONFIG_HOTSPOT_MS needs CONFIG_HOTSPOT"
 #endif
 #if CONFIG_DEBUGLINK && !CONFIG_HOSTLINK
 #error "CONFIG_DEBUGLINK needs CONFIG_HOSTLINK"

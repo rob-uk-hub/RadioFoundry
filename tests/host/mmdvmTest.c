@@ -9,6 +9,7 @@
 #include <string.h>
 #include "hotspot/mmdvm.h"
 #include "hotspot/hotspot.h"
+#include "hotspot/hotspotMs.h"
 #include "dmr/dmrData.h"
 #include "dmr/fec/dmrFec.h"
 #include "hotspot/dmrDataFrame.h"
@@ -50,6 +51,8 @@ static struct {
 	bool started, start_ok, begin_ok;
 	int starts, stops, begins, ends, aborts, restarts, configures;
 	int8_t cc, cc_filter;
+	int8_t last_ts;
+	dmr_timing_t last_timing;
 	uint8_t pending;	// queued and not yet "on air"
 	dmr_tx_burst_t log[LOG_MAX];
 	int log_count;
@@ -77,7 +80,14 @@ static void f_stop(void) { m.stops++; m.started = false; }
 static void f_configure(const dmr_config_t *cfg) { m.configures++; m.cc = cfg->cc; }
 static void f_rx_restart(void) { m.restarts++; }
 static void f_rx_lock_slot(int8_t ts) { (void)ts; }
-static bool f_tx_begin(dmr_timing_t t, int8_t ts, dmr_access_t a) { m.begins++; op('B'); return m.begin_ok; }
+static bool f_tx_begin(dmr_timing_t t, int8_t ts, dmr_access_t a)
+{
+	m.begins++;
+	m.last_ts = ts;
+	m.last_timing = t;
+	op('B');
+	return m.begin_ok;
+}
 static bool f_tx_queue(const dmr_tx_burst_t *b)
 {
 	if (m.pending >= 8) {
@@ -122,6 +132,7 @@ static struct {
 	bool enter_ok;
 	int enters, leaves, freqs;
 	uint32_t rx, tx;
+	uint32_t own_id;
 	uint8_t level;
 	int out_at_enter;	// frames written before the last enter (the reply goes first)
 	int16_t rssi;
@@ -146,17 +157,19 @@ static bool r_cw_id(const char *c, uint8_t len)
 }
 static bool r_cw_busy(void) { return r.cw_keyed; }
 static bool r_active(void) { return r.active; }
+static uint32_t r_dmr_id(void) { return r.own_id; }
 
 static const hotspot_radio_ops_t radio_ops = {
-	.enter = r_enter, .set_freq = r_set_freq, .set_power = r_set_power, .leave = r_leave,
+	.enter = r_enter, .dmr_id = r_dmr_id, .set_freq = r_set_freq, .set_power = r_set_power, .leave = r_leave,
 };
 // With the optional active op (a radio whose handover finishes after enter returned)
 static const hotspot_radio_ops_t radio_ops_active = {
-	.enter = r_enter, .active = r_active, .set_freq = r_set_freq, .set_power = r_set_power, .leave = r_leave,
+	.enter = r_enter, .active = r_active, .dmr_id = r_dmr_id, .set_freq = r_set_freq, .set_power = r_set_power,
+	.leave = r_leave,
 };
 // The same with the optional RSSI and CW ID ops
 static const hotspot_radio_ops_t radio_ops_full = {
-	.enter = r_enter, .set_freq = r_set_freq, .set_power = r_set_power, .leave = r_leave,
+	.enter = r_enter, .dmr_id = r_dmr_id, .set_freq = r_set_freq, .set_power = r_set_power, .leave = r_leave,
 	.rssi_dbm = r_rssi, .cw_id = r_cw_id, .cw_busy = r_cw_busy,
 };
 
@@ -328,20 +341,25 @@ static void voice_frame(uint8_t index, uint8_t seed, uint8_t *frame)
 	put_middle(frame, (index == 0) ? MS_VOICE_SYNC : EMB);
 }
 
-static uint8_t net(const uint8_t *frame33)
+static uint8_t net_on(uint8_t command, const uint8_t *frame33)
 {
 	uint8_t p[34];
 	int before = out_count;
 
 	p[0] = 0;	// a host's control byte
 	memcpy(p + 1, frame33, 33);
-	host(MMDVM_DMR_DATA2, p, 34);
+	host(command, p, 34);
 	for (int i = before; i < out_count; i++) {
-		if ((out[i].b[2] == MMDVM_NAK) && (out[i].b[3] == MMDVM_DMR_DATA2)) {
+		if ((out[i].b[2] == MMDVM_NAK) && (out[i].b[3] == command)) {
 			return out[i].b[4];
 		}
 	}
 	return 0;
+}
+
+static uint8_t net(const uint8_t *frame33)
+{
+	return net_on(MMDVM_DMR_DATA2, frame33);
 }
 
 static void net_lc(uint8_t dt, const uint8_t *lc)
@@ -367,11 +385,13 @@ static void reset_world(void)
 	m.start_ok = true;
 	m.begin_ok = true;
 	r.enter_ok = true;
+	r.own_id = 9990001;
 	out_count = 0;
 	hotspot_init(&fake_modem, mmdvm_send);
 	hotspot_set_radio(&radio_ops);
 	mmdvm_init(&io);
 	mmdvm_set_ext(NULL);
+	hotspot_ms_init(hotspot_ms_storage());
 #if CONFIG_HOTSPOT_SPLIT
 	hotspot_split_init();
 #endif
@@ -381,6 +401,13 @@ static void configure(uint8_t cc)
 {
 	// The SDR bench's config_v1: 23 payload bytes, simplex, DMR enabled, state DMR
 	uint8_t p[23] = { 0x80, 0x02, 10, MMDVM_MODE_DMR, 128, 128, cc, 0, 128, 0, 128, 0, 0, 128, 128 };
+	host(MMDVM_SET_CONFIG, p, sizeof(p));
+}
+
+// Hotspot MS mode: the 0x40 flag, which also clears the simplex bit on the host side
+static void configure_ms(uint8_t cc)
+{
+	uint8_t p[23] = { 0x40, 0x02, 10, MMDVM_MODE_DMR, 128, 128, cc, 0, 128, 0, 128, 0, 0, 128, 128 };
 	host(MMDVM_SET_CONFIG, p, sizeof(p));
 }
 
@@ -1410,6 +1437,402 @@ static void test_hostlink_dtr(void)
 	CHECK(hostlink_session_check(&hs, false, false, false, 10) == HOSTLINK_LEAVE_GONE);
 }
 
+static void rf_on(int8_t ts, const dmr_burst_t *b)
+{
+	dmr_event_t ev = { .kind = DMR_EV_BURST_RX, .ts = ts, .burst = b };
+
+	hotspot_modem_event(&ev, NULL);
+	now += 60;
+	hotspot_poll(now);
+}
+
+// A BS-synced burst: the repeater is there, so hotspot MS mode may key. Idle: nothing goes up
+static void bs_sync_on(int8_t ts)
+{
+	dmr_burst_t b;
+
+	memset(&b, 0, sizeof(b));
+	b.kind = DMR_BURST_IDLE;
+	b.sync = DMR_SYNC_BS;
+	b.ts = ts;
+	b.crc_ok = true;
+	rf_on(ts, &b);
+}
+
+// SET_CONFIG 0x40: an MS on a repeater, both slots heard and sent
+static void test_ms_rx(void)
+{
+	dmr_burst_t b;
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	CHECK(hotspot_ms_mode());
+	CHECK(m.cc_filter == 1);
+
+	for (int ts = 1; ts <= 2; ts++) {
+		memset(&b, 0, sizeof(b));
+		b.kind = DMR_BURST_VOICE_LC_HEADER;
+		b.crc_ok = true;
+		b.lc_valid = true;
+		b.len = 12;
+		memcpy(b.lc, LC1, 9);
+		b.ts = (int8_t)ts;
+		rf_on((int8_t)ts, &b);
+
+		memset(&b, 0, sizeof(b));
+		b.kind = DMR_BURST_VOICE;
+		b.voice_index = 0;
+		b.crc_ok = true;
+		b.lc_valid = true;
+		b.len = 27;
+		memcpy(b.lc, LC1, 9);
+		for (int i = 0; i < 27; i++) {
+			b.payload[i] = (uint8_t)(0x20 + i + ts);
+		}
+		b.ts = (int8_t)ts;
+		rf_on((int8_t)ts, &b);
+	}
+	CHECK(count_out(MMDVM_DMR_DATA1) >= 2);
+	CHECK(count_out(MMDVM_DMR_DATA2) >= 2);
+
+	poll_for(600);
+	CHECK(count_out(MMDVM_DMR_LOST1) >= 1);
+	CHECK(count_out(MMDVM_DMR_LOST2) >= 1);
+}
+
+static void test_ms_tx(void)
+{
+	uint8_t f[33];
+
+	reset_world();
+	configure_ms(7);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	CHECK(hotspot_ms_mode());
+	bs_sync_on(1);
+	voice_frame(0, 3, f);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 1 && m.last_ts == 1 && m.last_timing == DMR_TIMING_ALIGNED);
+	CHECK(m.log_count == 1 && m.log[0].kind == DMR_BURST_VOICE);
+
+	// The second slot waits in the queue until the first burst's TX_DONE; it then keys on its own slot
+	voice_frame(0, 4, f);
+	CHECK(net_on(MMDVM_DMR_DATA2, f) == 0);
+	CHECK(m.begins == 1);
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 2 && m.last_ts == 2);
+	CHECK(m.log_count == 2 && m.log[1].kind == DMR_BURST_VOICE);
+
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(!hotspot_ms_mode() || m.begins == 2);
+}
+
+// A host data list (an SMS: header and five rate 1/2 blocks) keeps every payload and its order in MS mode
+static void test_ms_data(void)
+{
+	uint8_t f[33], info[12];
+	int sent = 0;
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	bs_sync_on(1);
+
+	for (int i = 0; i < 6; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x10 + i);
+		info[1] = (uint8_t)(0xA0 + i);
+		data_frame(i == 0 ? DMR_TYPE_DATA_HEADER : DMR_TYPE_RATE_1_2, info, 1, f);
+		CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+		sent++;
+	}
+	poll_for(200);		// the data list is collected, then sent in one key-up
+	CHECK(m.begins == 1 && m.ends == 1 && m.log_count == sent);
+	air();
+	tx_done();
+	poll_for(5);
+	for (int i = 0; i < sent && i < m.log_count; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x10 + i);
+		info[1] = (uint8_t)(0xA0 + i);
+		CHECK(m.log[i].kind == (i == 0 ? DMR_BURST_DATA_HEADER : DMR_BURST_RATE_12_DATA));
+		CHECK(m.log[i].len == 12);
+		CHECK(memcmp(m.log[i].payload, info, 12) == 0);
+	}
+}
+
+// A longer data list (more than the modem's burst queue) keeps one key-up: the driver queue drains while the rest
+// stays in the host queue
+static void test_ms_data_long(void)
+{
+	uint8_t f[33], info[12];
+	const int sent = 16;
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	bs_sync_on(1);
+
+	for (int i = 0; i < sent; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x20 + i);
+		info[1] = (uint8_t)(0xB0 + i);
+		data_frame(i == 0 ? DMR_TYPE_DATA_HEADER : DMR_TYPE_RATE_1_2, info, 1, f);
+		CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	}
+	poll_for(200);
+	CHECK(m.begins == 1 && m.ends == 0);
+	air();
+	poll_for(5);
+	CHECK(m.begins == 1 && m.ends == 1 && m.log_count == sent);
+	for (int i = 0; i < sent && i < m.log_count; i++) {
+		CHECK(m.log[i].kind == (i == 0 ? DMR_BURST_DATA_HEADER : DMR_BURST_RATE_12_DATA));
+	}
+	tx_done();
+	poll_for(5);
+}
+
+// The software host queue is one pool for both slots: the two spaces fall together and a full pool is NAK 5
+static void test_ms_shared_space(void)
+{
+	uint8_t f[33];
+	int accepted = 0;
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	bs_sync_on(1);
+	CHECK(hotspot_space_slot(1) == hotspot_space_slot(2));
+
+	// The first frame keys; the rest fill the shared pool up to its margin
+	for (int i = 0; i < 70; i++) {
+		voice_frame(0, (uint8_t)i, f);
+		uint8_t nak = net_on((i & 1) ? MMDVM_DMR_DATA2 : MMDVM_DMR_DATA1, f);
+
+		if (nak == MMDVM_NAK_FULL) {
+			break;
+		}
+		CHECK(nak == 0);
+		accepted++;
+	}
+	CHECK(accepted >= 60 && accepted < 64);
+	CHECK(hotspot_space_slot(1) == 0 && hotspot_space_slot(2) == 0);
+
+	for (int i = 0; i < 70; i++) {
+		air();
+		tx_done();
+		poll_for(5);
+	}
+	CHECK(hotspot_space_slot(1) > 0 && hotspot_space_slot(1) == hotspot_space_slot(2));
+}
+
+// Arrival order across the slots: TS1, TS2, TS1 keys in that order, one burst per TX_DONE
+static void test_ms_slot_order(void)
+{
+	uint8_t f[33], a[27], b[27], c[27];
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	bs_sync_on(1);
+
+	voice_frame(0, 0x11, f);
+	hotspot_frame_voice(f, a);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 1 && m.last_ts == 1 && m.log_count == 1);
+	CHECK(memcmp(m.log[0].payload, a, 27) == 0);
+
+	voice_frame(0, 0x22, f);
+	hotspot_frame_voice(f, b);
+	CHECK(net_on(MMDVM_DMR_DATA2, f) == 0);
+	voice_frame(0, 0x33, f);
+	hotspot_frame_voice(f, c);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 1 && m.log_count == 1);
+
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 2 && m.last_ts == 2 && m.log_count == 2);
+	CHECK(memcmp(m.log[1].payload, b, 27) == 0);
+
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 3 && m.last_ts == 1 && m.log_count == 3);
+	CHECK(memcmp(m.log[2].payload, c, 27) == 0);
+}
+
+// A data list on one slot stays one key-up when the other slot's frame is queued between its frames
+static void test_ms_data_interleaved(void)
+{
+	uint8_t f[33], info[12], voice[27];
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	bs_sync_on(1);
+
+	for (int i = 0; i < 6; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x50 + i);
+		info[1] = (uint8_t)(0xC0 + i);
+		data_frame(i == 0 ? DMR_TYPE_DATA_HEADER : DMR_TYPE_RATE_1_2, info, 1, f);
+		CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	}
+	voice_frame(0, 0x5A, f);
+	hotspot_frame_voice(f, voice);
+	CHECK(net_on(MMDVM_DMR_DATA2, f) == 0);
+	CHECK(m.begins == 0);		// the data list is still being collected
+
+	poll_for(200);
+	CHECK(m.begins == 1 && m.last_ts == 1 && m.log_count == 6 && m.ends == 1);
+	for (int i = 0; i < 6; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x50 + i);
+		info[1] = (uint8_t)(0xC0 + i);
+		CHECK(m.log[i].kind == (i == 0 ? DMR_BURST_DATA_HEADER : DMR_BURST_RATE_12_DATA));
+		CHECK(memcmp(m.log[i].payload, info, 12) == 0);
+	}
+
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 2 && m.last_ts == 2 && m.log_count == 7);
+	CHECK(memcmp(m.log[6].payload, voice, 27) == 0);
+}
+
+// No BS sync yet: the first host frame wakes the repeater with BS_Dwn_Act, and only its BS answer keys the frame
+static void test_ms_tx_waits_sync(void)
+{
+	uint8_t f[33];
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+	voice_frame(0, 3, f);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 1 && m.log_count == 1);
+	CHECK(m.last_ts == 1 && m.last_timing == DMR_TIMING_OWN);
+	CHECK(m.log[0].kind == DMR_BURST_CSBK && m.log[0].len == 12);
+	CHECK(m.log[0].payload[7] == (uint8_t)(r.own_id >> 16) &&
+	      m.log[0].payload[8] == (uint8_t)(r.own_id >> 8) &&
+	      m.log[0].payload[9] == (uint8_t)r.own_id);
+
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 1 && m.log_count == 1);	// no host burst before the BS answer
+
+	// No answer: the wake-up is sent again after 600 ms
+	now += 600;
+	hotspot_poll(now);
+	CHECK(m.begins == 2 && m.log_count == 2 && m.log[1].kind == DMR_BURST_CSBK);
+	air();
+	tx_done();
+	poll_for(5);
+
+	bs_sync_on(1);
+	CHECK(m.begins == 3 && m.last_ts == 1 && m.last_timing == DMR_TIMING_ALIGNED);
+	CHECK(m.log_count == 3 && m.log[2].kind == DMR_BURST_VOICE);
+
+	// The sync ages out: another frame wakes again, waits, then goes out after the answer
+	air();
+	tx_done();
+	poll_for(5);
+	now += 600;
+	hotspot_poll(now);
+	voice_frame(0, 4, f);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 4 && m.log_count == 4 && m.log[3].kind == DMR_BURST_CSBK);
+	air();
+	tx_done();
+	poll_for(5);
+	CHECK(m.begins == 4 && m.log_count == 4);
+	bs_sync_on(1);
+	CHECK(m.begins == 5 && m.log_count == 5 && m.log[4].kind == DMR_BURST_VOICE);
+
+	// A lost receiver sync also wakes and waits again
+	air();
+	tx_done();
+	poll_for(5);
+	dmr_event_t lost = { .kind = DMR_EV_SYNC_LOST };
+	hotspot_modem_event(&lost, NULL);
+	hotspot_poll(++now);
+	voice_frame(0, 5, f);
+	CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	CHECK(m.begins == 6 && m.log_count == 6 && m.log[5].kind == DMR_BURST_CSBK);
+	air();
+	tx_done();
+	poll_for(5);
+	bs_sync_on(1);
+	CHECK(m.begins == 7 && m.log_count == 7 && m.log[6].kind == DMR_BURST_VOICE);
+}
+
+// The repeater sleeps between data messages: the next message must wake it again
+static void test_ms_wake_after_data(void)
+{
+	uint8_t f[33], info[12];
+
+	reset_world();
+	configure_ms(1);
+	set_freq(438800000, 438800000, 128);
+	CHECK(ack_for(MMDVM_SET_FREQ));
+
+	for (int i = 0; i < 6; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x30 + i);
+		data_frame(i == 0 ? DMR_TYPE_DATA_HEADER : DMR_TYPE_RATE_1_2, info, 1, f);
+		CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	}
+	CHECK(m.begins == 1 && m.log_count == 1 && m.log[0].kind == DMR_BURST_CSBK);
+	air();
+	tx_done();
+	poll_for(5);
+	bs_sync_on(1);
+	poll_for(200);	// the first data list goes out
+	CHECK(m.begins == 2 && m.ends == 2 && m.log_count == 7);
+	air();
+	tx_done();
+	poll_for(5);
+
+	now += 600;		// the repeater sleeps; the sync ages out
+	hotspot_poll(now);
+	for (int i = 0; i < 6; i++) {
+		memset(info, 0, sizeof(info));
+		info[0] = (uint8_t)(0x40 + i);
+		data_frame(i == 0 ? DMR_TYPE_DATA_HEADER : DMR_TYPE_RATE_1_2, info, 1, f);
+		CHECK(net_on(MMDVM_DMR_DATA1, f) == 0);
+	}
+	CHECK(m.begins == 3 && m.log_count == 8 && m.log[7].kind == DMR_BURST_CSBK);
+	air();
+	tx_done();
+	poll_for(5);
+	bs_sync_on(1);
+	poll_for(200);
+	CHECK(m.begins == 4 && m.ends == 4 && m.log_count == 14);
+}
+
+static void test_ms_config_unsupported(void)
+{
+	reset_world();
+	hotspot_init(NULL, mmdvm_send);	// no modem: no MS outbound path
+	configure_ms(1);
+	CHECK(nak_for(MMDVM_SET_CONFIG, MMDVM_NAK_WRONG_MODE));
+}
+
 static void test_end(void)
 {
 	reset_world();
@@ -1473,6 +1896,16 @@ int main(void)
 	test_enter_finishes_later();
 	test_slow_enter();
 	test_config();
+	test_ms_rx();
+	test_ms_tx();
+	test_ms_data();
+	test_ms_data_long();
+	test_ms_shared_space();
+	test_ms_slot_order();
+	test_ms_data_interleaved();
+	test_ms_tx_waits_sync();
+	test_ms_wake_after_data();
+	test_ms_config_unsupported();
 	test_extension();
 	test_net_call();
 	test_short_call();

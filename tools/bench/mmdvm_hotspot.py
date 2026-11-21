@@ -8,13 +8,16 @@ Talk to the radio under test as an MMDVM modem (the public MMDVM serial protocol
 bench tests of its hotspot and single frequency repeater (SFR) modes (CONFIG_HOTSPOT, CONFIG_SFR).
 
     mmdvm_hotspot.py [--port /dev/tty.usbmodemXXXX | --udp 192.168.x.y:3334 [--local :3335]]
-                     --freq MHZ --cc CC [--power 12] [--seconds 20] [--simplex | --sfr]
+                     [--freq MHZ | --rx MHZ --tx MHZ] --cc CC [--power 12] [--seconds 20]
+                     [--simplex | --sfr | --ms]
                      [--debug flags,framing[,reg10[,reg12[,rssiMin[,reg11[,flags2]]]]]]
                      [--json]
 
-What it does: SET_FREQ, SET_CONFIG (simplex flag set with --simplex, the default; duplex with RX = TX with --sfr,
-which is how our firmware's SFR is turned on: core/dmr/sfr.c sfrMmdvmTrigger), SET_MODE DMR; then GET_STATUS every
-250 ms, logging every frame the radio sends up (DMR_DATA1/2, DMR_LOST1/2, NAK) and status changes, for --seconds.
+What it does: SET_FREQ (RX = TX from --freq; --rx and --tx give a split, e.g. hotspot MS mode on a repeater),
+SET_CONFIG (simplex flag set with --simplex, the default; duplex with RX = TX with --sfr, which is how our
+firmware's SFR is turned on: core/dmr/sfr.c sfrMmdvmTrigger; hotspot MS mode with --ms, MMDVM_CONFIG_MS: the radio
+is a mobile station on a repeater, both slots), SET_MODE DMR; then GET_STATUS every 250 ms, logging every frame the
+radio sends up (DMR_DATA1/2, DMR_LOST1/2, NAK) and status changes, for --seconds.
 
 Transports: --port is a serial port (USB CDC ACM, 115200 8N1, the standard MMDVM link). --udp is MMDVMHost's UDP
 modem transport (MMDVMHost [Modem] Protocol=udp, ModemAddress / ModemPort; also what the bench gateway's UDP port speaks), for a
@@ -136,22 +139,25 @@ class Transport:
             self.ser.close()
 
 
-def config_payload(cc: int, simplex: bool) -> bytes:
+def config_payload(cc: int, simplex: bool, ms: bool = False) -> bytes:
     cfg = bytearray(23)
-    cfg[0], cfg[1], cfg[2], cfg[3] = (0x80 if simplex else 0x00), 0x02, 10, 2   # simplex/duplex, DMR, 100 ms, DMR
+    flags = 0x40 if ms else (0x80 if simplex else 0x00)   # MS mode wins over simplex (mmdvm.h MMDVM_CONFIG_MS)
+    cfg[0], cfg[1], cfg[2], cfg[3] = flags, 0x02, 10, 2   # simplex/duplex/MS, DMR, 100 ms, DMR
     cfg[4], cfg[5], cfg[6], cfg[7], cfg[8], cfg[10], cfg[13], cfg[14] = 128, 128, cc, 0, 128, 128, 128, 128
     return bytes(cfg)
 
 
-def freq_payload(hz: int, power: int) -> bytes:
-    return b"\x00" + hz.to_bytes(4, "little") * 2 + bytes([power]) + hz.to_bytes(4, "little")
+def freq_payload(rx_hz: int, tx_hz: int, power: int) -> bytes:
+    # SET_FREQ: RX, TX, RF level, then the POCSAG frequency (the modem ignores it for DMR)
+    return (b"\x00" + rx_hz.to_bytes(4, "little") + tx_hz.to_bytes(4, "little") +
+            bytes([power]) + tx_hz.to_bytes(4, "little"))
 
 
 class MmdvmLink:
     """The radio as a standard host's modem: configured, polled every 250 ms, everything it sends recorded."""
 
-    def __init__(self, transport: Transport, freq_hz: int, cc: int, power: int, simplex: bool = True,
-                 debug: bytes = None, log=None):
+    def __init__(self, transport: Transport, rx_hz: int, tx_hz: int, cc: int, power: int, simplex: bool = True,
+                 ms: bool = False, debug: bytes = None, log=None):
         self.t = transport
         self.frames = []            # (t, cmd, bytes) of everything but ACKs and status
         self.naks = []
@@ -162,7 +168,7 @@ class MmdvmLink:
         self.lock = threading.Lock()
         self.stop = False
         self.log = log or (lambda *a: None)
-        cmds = [(SET_FREQ, freq_payload(freq_hz, power)), (SET_CONFIG, config_payload(cc, simplex)),
+        cmds = [(SET_FREQ, freq_payload(rx_hz, tx_hz, power)), (SET_CONFIG, config_payload(cc, simplex, ms)),
                 (SET_MODE, b"\x02")]
         if debug:
             cmds.append((RFOUNDRY_SFR_DEBUG, debug))
@@ -231,18 +237,29 @@ def main():
     ap.add_argument("--port", default=None, help="serial port of the radio's USB CDC MMDVM link")
     ap.add_argument("--udp", default=None, help="host:port of an MMDVM UDP modem (optional transport)")
     ap.add_argument("--local", default=":3335", help="local host:port for --udp")
-    ap.add_argument("--freq", type=float, default=os.environ.get("RFOUNDRY_BENCH_FREQ"), required="RFOUNDRY_BENCH_FREQ" not in os.environ,
-                    help="MHz ($RFOUNDRY_BENCH_FREQ): the rig's test frequency, no default")
+    ap.add_argument("--freq", type=float, default=os.environ.get("RFOUNDRY_BENCH_FREQ"),
+                    help="MHz ($RFOUNDRY_BENCH_FREQ): the rig's test frequency, used for both RX and TX unless --rx/--tx")
+    ap.add_argument("--rx", type=float, default=None, help="MHz: receive frequency (default --freq)")
+    ap.add_argument("--tx", type=float, default=None, help="MHz: transmit frequency (default --freq)")
     ap.add_argument("--cc", type=int, default=os.environ.get("RFOUNDRY_BENCH_CC"), required="RFOUNDRY_BENCH_CC" not in os.environ,
                     help="color code ($RFOUNDRY_BENCH_CC), no default")
     ap.add_argument("--power", type=int, default=12, help="SET_FREQ RF level 0-255")
     ap.add_argument("--seconds", type=float, default=20)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--simplex", action="store_true", help="normal simplex hotspot (default)")
-    mode.add_argument("--sfr", action="store_true", help="duplex with RX = TX: our SFR mode")
+    mode.add_argument("--sfr", action="store_true", help="duplex with RX = TX: our SFR mode (--rx must equal --tx)")
+    mode.add_argument("--ms", action="store_true",
+                      help="hotspot MS mode: a mobile station on a repeater, both slots (radio built with CONFIG_HOTSPOT_MS=y; "
+                           "use --rx/--tx for the repeater split)")
     ap.add_argument("--debug", default=None, help="our 0xD5 extension: hex bytes, e.g. 04,00")
     ap.add_argument("--json", action="store_true", help="log lines as JSON")
     args = ap.parse_args()
+    if args.freq is None and (args.rx is None or args.tx is None):
+        ap.error("give --freq, or both --rx and --tx")
+    rx = args.rx if args.rx is not None else args.freq
+    tx = args.tx if args.tx is not None else args.freq
+    if args.sfr and (rx != tx):
+        ap.error("--sfr needs RX = TX (--freq, or equal --rx and --tx)")
     if not (args.port or args.udp):
         ap.error("give --port (USB CDC serial) or --udp host:port")
 
@@ -256,8 +273,8 @@ def main():
             print(f"{time.monotonic() - t0:7.3f}", *a, flush=True)
 
     debug = bytes(int(x, 16) for x in args.debug.split(",")) if args.debug else None
-    link = MmdvmLink(Transport(args.port, args.udp, args.local), int(round(args.freq * 1e6)), args.cc, args.power,
-                     simplex=not args.sfr, debug=debug, log=log)
+    link = MmdvmLink(Transport(args.port, args.udp, args.local), int(round(rx * 1e6)), int(round(tx * 1e6)),
+                     args.cc, args.power, simplex=not args.sfr, ms=args.ms, debug=debug, log=log)
     while time.monotonic() - t0 < args.seconds:
         time.sleep(0.005)
     link.stop = True

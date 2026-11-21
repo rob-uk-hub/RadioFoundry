@@ -312,7 +312,7 @@ static uint8_t ext_version_suffix(char *buf, uint8_t max)
 
 static void ext_config_changed(bool simplex, uint32_t rx_hz, uint32_t tx_hz)
 {
-	wanted = sfrMmdvmTrigger(simplex, rx_hz, tx_hz);
+	wanted = !hotspot_ms_mode() && sfrMmdvmTrigger(simplex, rx_hz, tx_hz);
 	if (!wanted) {
 		if (on) {
 			turn_off();
