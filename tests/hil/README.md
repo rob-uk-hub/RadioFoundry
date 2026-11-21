@@ -43,7 +43,8 @@ frame counter can check. Without `--allow-rf`, a radio or the SDR bench, these t
 `DMR AUDIO NOT CHECKED`: such a run hasn't checked DMR audio. With the radio and the bench there, nothing else skips
 them: no recording, no vocoder, no DMR channel on `MHZ` or firmware without the view keys fails. The exceptions are
 `test_dmr_audio_rx_deviation` and `test_dmr_audio_rx_offset_wide`, which skip on a bench board that can't scale its
-deviation (info feature `dev_scale`) or bring the radio near -100 dBm (`power_dbm`). Run only the smoke with
+deviation (info feature `dev_scale`) or bring the radio near -100 dBm (`power_dbm`), and `test_dmr_audio_rx_strong`,
+which skips when the bench can't bring the radio near -75 or -55 dBm (coupled too loosely). Run only the smoke with
 `-m audio_smoke`.
 
 ### Opt-in flags
@@ -59,7 +60,7 @@ deviation (info feature `dev_scale`) or bring the radio near -100 dBm (`power_db
 | `--allow-reboot` | tests that restart the radio (marker `reboot`) through the debug link's REBOOT (mode 0) |
 | `--manual` | tests that ask a person at the radio to do something (marker `manual`; run with `-s` to see the prompts), e.g. turn the channel knob |
 
-Other options: `--codeplug-backup-dir` (where codeplug_write tests keep their backups, outside the repository), `--codeplug-image FILE` (or `RFOUNDRY_HIL_CODEPLUG_IMAGE`: the radio's codeplug as a file, taken as the backup; only the sectors an edit writes are read from the radio, to check the file against it, verify the write and verify the restore), `--rssi-floor` (FM test),
+Other options: `--firmware-image FILE` (or `RFOUNDRY_HIL_FIRMWARE_IMAGE`: the `.bin` the radio was flashed with; `test_support_info` checks the radio's image hash against its SHA-256, the comparison a support report makes), `--codeplug-backup-dir` (where codeplug_write tests keep their backups, outside the repository), `--codeplug-image FILE` (or `RFOUNDRY_HIL_CODEPLUG_IMAGE`: the radio's codeplug as a file, taken as the backup; only the sectors an edit writes are read from the radio, to check the file against it, verify the write and verify the restore), `--rssi-floor` (FM test),
 `--ambe` / `$RFOUNDRY_HIL_AMBE` (speech recording for the voice test), `--shots DIR`, `--max-foff` (largest carrier offset the TX tests
 accept, default 500 Hz), `--aprs-ssid` (default 15), `--no-gps` (the radio has no GPS module fitted: test_gps_nmea skips), `--roam-beacon` / `--roam-beacon-len` (test_roaming's beacon interval and duration, default 20 s / 3 s), `--split-tx-mhz` (test_dmr_tx_split_repeater and test_dmr_repeater_slots: the radio's TX frequency on its DMR test channel made split, the bench repeater's input; no default), `--outbound-mhz` (test_dmr_outbound_voice: a repeater's output the bench board sends BS bursts and voice on; the radio needs a duplex DMR channel receiving it; no default), `--am-mhz` (test_am_rx and test_am_rx_speaker: the AM test frequency in the air band, 108-137 MHz, that the bench board sends full-carrier AM on and the radio's VFO receives; the bench transmits on it: a cabled setup unless the frequency is approved for the air; no default), `--repeater-out-mhz` / `--repeater-in-mhz` / `--repeater-cc` / `--repeater-keyups` (test_dmr_repeater_keyup: a real duplex DMR repeater that answers a wake-up, its output and input, its color code, default `--dmr-cc`, and the key-ups timed around its hang's end, default 14; no default frequencies), `--split-calls` (that test keys up this many times per run, default 1; the split is written and restored once), `--roam-rx` / `--roam-tx` (test_roaming's bench repeater site as the radio
 sees it: its receive and transmit MHz; no default; with `--allow-codeplug-write` the zone's sites are given TX
@@ -257,7 +258,7 @@ uses. A test with none of these markers needs no bench. The `sdr_bench` fixture 
 |---|---|---|
 | `sdr_rx` | the board's receiver only | the radio transmits and the SDR measures it: `test_fm_tx.py`, `test_audio_probe.py` (the FM TX probes), `test_mic_gain.py`, `test_hotspot_cwid.py`, `test_usrp_fm_tx`, `test_split_tx_half_off_air`, `test_split_tx_half_voice`, the three `test_aprs_on_air_*`, `test_dmr_repeater_keyup` (a real repeater answers the radio) |
 | `bench_modem` | the board's transmitter only (it transmits to the radio, listens to it or runs as a repeater) | `test_dmr_rx.py`, `test_dmr_voice.py`, `test_dmr_call_features.py`, `test_dmr_data.py`, `test_dmr_emergency.py`, `test_dmr_ip.py`, `test_dmr_ip_burst.py`, `test_control_station.py`, `test_roaming.py` (the bench repeater), `test_dmr_gps_tx`, `test_dmr_tx_split_repeater` (its repeater is required, the SDR's view of the radio is optional), `test_dmr_repeater_slots` (the bench repeater only), `test_aprs_dmr_position`, `test_split_rx_half_labels`, `test_net_split_rx_half_labels`, `test_usrp_dmr_rx`, the four scan / battery-save tests in `test_radio_features.py` |
-| `bench_modem` and `sdr_rx` | both | `test_dmr_tx_off_air` (the SDR's waveform and the modem's decode), `test_sfr_repeats_bench_call` (the modem sends the call, the SDR sees the repeat), `test_dmr_repeater_burst_offset` (the bench repeater; the SDR times both sides) |
+| `bench_modem` and `sdr_rx` | both | `test_dmr_tx_off_air` (the SDR's waveform and the modem's decode), `test_sfr_repeats_bench_call` (the modem sends the call, the SDR sees the repeat), `test_dmr_repeater_burst_offset` (the bench repeater; the SDR times both sides), `test_dmr_repeater_inbound_fec` (the bench repeater; the SDR decodes the radio's inbound voice) |
 | `sdr_or_modem` | either one; the test accepts what one of them heard | `test_dmr_tx_talker_alias`, `test_dmr_privacy_tx` |
 | none (radio only) | neither | everything else |
 
@@ -439,7 +440,9 @@ the frames sent; `voice.rx_peak` at least 1000; `voice.rx_repeats` at most the r
 + 2 + 2 % of the frames; FEC corrections at most 2 bits a frame on average. The same near -100 dBm at the radio: with
 the carrier 2.5 kHz below and above the channel (`test_dmr_audio_rx_offset_wide`), and from a transmitter at 0.85 and
 1.15 of the standard's deviation with at least 95 % of the frames and at most 0.8 bits a frame
-(`test_dmr_audio_rx_deviation`). TX: the radio made one call of at least 30
+(`test_dmr_audio_rx_deviation`). Simplex speech near -75 and -55 dBm with at least 95 % of the frames and at most 0.2
+bits a frame at each (`test_dmr_audio_rx_strong`: a receiver AGC that overloads the start of every burst corrects a bit
+or more). TX: the radio made one call of at least 30
 frames a second of PTT with at most 10 % `voice.tx_repeats`; the bench heard a call from the radio's ID with at least
 as many frames, at most 15 % of them the AMBE silence frame, at most 10 % equal to the frame before and at least a
 tenth distinct (the test signal repeats its cycle); played back to the radio, the RX criteria without the FEC limit (the recording carries what the bench heard).
@@ -507,7 +510,7 @@ and unkeys, the LCs heard to the talkgroup from us all carry service options bit
 
 `test_aprs`: the view keys present, the SSID round trip; with a test call and host NMEA `aprs.pos_src=host`,
 `aprs.lat` / `aprs.lon` within 1e-3 degree. On air (AFSK): `aprs.tx_power=0` before keying (else skipped), one frame
-with a valid FCS from `CALL-SSID` to `APZRDF` with no digipeaters, control 0x03, PID 0xF0; the position within 1e-4
+with a valid FCS from `CALL-SSID` to the radio's tocall (`aprs.tocall`, `APRDF?`) with no digipeaters, control 0x03, PID 0xF0; the position within 1e-4
 degree of 33.7490, -84.3880, the status `>` + its text, the message `:ADDRESSEE:text{N`; `aprs.rf_sent` +1 within
 15 s, `aprs.rf_active=0`, the radio idle on its channel afterwards; deviation peak (99.9th percentile) 2.0-4.5 kHz,
 |twist| under 6 dB; printed: mark and space deviation, TX delay (flags and carrier to first frame bit), the phase

@@ -34,8 +34,9 @@ Each board fixes the values in its `hal_flash_map_t`, and its hardware page list
 high, is the open-firmware EEPROM image, the settings ring (32 KB, 8 sectors), the journal (2 sectors), the
 open-firmware flash image (up to `openfw_end`), the native codeplug (1 MB) and, on boards with room, a 256 KB staging
 area. A board that keeps its calibration in the vendor layout lists no calibration window. A map assumes its chip's
-size: when the probed chip is smaller than the map's highest area (`hal_flash_map_end`), the driver offers no map, and
-an address past the chip fails rather than wrapping to a lower one. The boards are in
+size: when the probed chip is smaller than the map's highest area (`hal_flash_map_end`), the driver offers the board's
+map for a smaller part if it has one and the chip holds it (`hal_flash_map_for`), else no map, and an address past the
+chip fails rather than wrapping to a lower one. A map without a native area makes the factory reset skip that step. The boards are in
 [feature-matrix.md](../feature-matrix.md).
 
 The core works in 4 KB erase units (`STORAGE_SECTOR`). A board whose flash erases in other units gets no writes. A
@@ -75,7 +76,7 @@ so with two pages a sector is erased once every 64 saves.
 ### 2.1 Pages
 
 `settings_t` is longer than one slot's payload, so it is stored as pages: page k holds bytes `236 * k` on.
-`SETTINGS_PAGES` is the number its size needs (2 now, 400 bytes); the page field allows 16 (3776 bytes). Each page is
+`SETTINGS_PAGES` is the number its size needs (2 now, 408 bytes); the page field allows 16 (3776 bytes). Each page is
 a record with its own length, so `settings_t` grows by appending fields, and a short page fills the fields it has.
 
 | Rule | Why |
@@ -143,7 +144,7 @@ callsign. The own DMR ID is always the codeplug's.
 | DMR emergency | `em_dst em_mode em_flags` (target is a radio, ETSI alarm FID, no alert tone) `em_alarm_tries em_hot_mic_s em_stored` (appended for dmr-ext, `dmr-emergency.md` 5) |
 | hotspot CW ID | `cw_wpm cw_tone_hz` (0 = 20 wpm / 800 Hz; appended for dmr-ext) |
 | DMR roaming | `roam_rssi_dbm roam_hyst_db roam_probe roam_stored roam_check_s` (the radio core's roaming settings, taken when `roam_stored` is 1) and `roam_zones[10]` (bit z: zone z is a roaming zone, zones 0..79; written by the radio core on RREQ_ROAM) (appended for roaming, `dmr-roaming.md` 5.1) |
-| more UI settings | `theme` (0 dark, 1 light, 2 high contrast), `ui_flags` (large text, hint row, message tone, talker alias shown, PTT when locked, hear all by default, 0x40 vibrate off, 0x80 `SETTINGS_UI_DUAL_TALK_BACK` dual watch talk back; default hint row, message tone, talker alias and PTT when locked on, and the vibrate-off and talk back bits clear, so vibrate is on and talk back is off), `updown_home` (0 channel, 1 zone, 2 talk target; bit 7 `SETTINGS_HOME_LABEL_FIRST`, Home's talk line with the talkgroup's name first, 0 in older records: the number first), `low_batt_pct` (5..30, default 15; 0 = the radio core's voltage levels only), `auto_off_min` (0 = never) and a reserved u16, now `aprsis_port` (appended for uifix; a record without them keeps these defaults) |
+| more UI settings | `theme` (bits 0-1: 0 dark, 1 light, 2 high contrast, 3 night; firmware from before night reads 3 as dark), `ui_flags` (large text, hint row, message tone, talker alias shown, PTT when locked, hear all by default, 0x40 vibrate off, 0x80 `SETTINGS_UI_DUAL_TALK_BACK` dual watch talk back; default hint row, message tone, talker alias and PTT when locked on, and the vibrate-off and talk back bits clear, so vibrate is on and talk back is off), `updown_home` (0 channel, 1 zone, 2 talk target; bit 7 `SETTINGS_HOME_LABEL_FIRST`, Home's talk line with the talkgroup's name first, 0 in older records: the number first), `low_batt_pct` (5..30, default 15; 0 = the radio core's voltage levels only), `auto_off_min` (0 = never) and a reserved u16, now `aprsis_port` (appended for uifix; a record without them keeps these defaults) |
 | roaming survey | `roam_beacon_s` (the repeaters' beacon interval, 0 = none, else 10..600, default 60), `roam_beacon_len_s` (1..10, default 4), `roam_survey` (0 off, 1 synced, 2 per site; default 1), `rpt_beacon` (bit 0: our repeater roles' idle beacon, default 0; bits 1-2: an SFR user's receive mode `sfr_rx`, 0 repeater only (default), 1 first copy, 2 dual-path RX, `sfr.md` 4; bits 3-5: the SFR repeater's CW ID interval `sfr_cwid`, 0 off (default), 1 5 min, 2 10 min, 3 15 min, 4 30 min, `sfr.md` 4; a record from before reads 0), `aprs_power` (APRS's RF power, `aprs.md` 11; 0 = the radio's current level, which a record from before it reads as), `aprs_cp_path` (what was last taken from the codeplug APRS record,
 `aprs.md` 11: bits 0-2 the path into `aprs_path`, bits 3-7 the SSID into `aprs_ssid`, each + 1, 0 = none yet; through
 `settings_aprs_cp_path` / `_ssid`, so a record from before the SSID reads none), `volume` (the speaker volume of a radio without a knob; in the old `reserved6`, so a record from before it reads as the default. 0 = the default step; bit 7 set = `0x80 | (step + 1)` for step 0..16 (0 = mute); 1..11 = step + 1 of the first version's 0..10 range, read as step 0..10 scaled to 0..16 (round(step * 16 / 10): the default 5 is 8, 10 is 16) and rewritten in the new form at the next save; `radio-features.md` 4.2) |
@@ -167,6 +168,7 @@ callsign. The own DMR ID is always the codeplug's.
 | power level count | Page 1, after `vfo2_sfr` (was `reserved9`): `power_levels`, the board's power level count (`board_t.power_count`) that `vfo_power`, `vfo2_power`, `master_power` and `aprs_power` count against. A level is an index into the board's levels, so when a board's levels change the same index names another power, possibly a higher one. A record whose count isn't the board's, an older record's 0 included, loads with those four back to their defaults (not set, and `aprs_power` 0, the current level) and the board's count; the next save stores it |
 | Tier III stun | Page 1, appended after `power_levels`: `t3_stun`, a stun kept across a restart ([dmr-trunking.md](dmr-trunking.md) 7.9). Bit 7 (`SETTINGS_T3_STUN`) set: stunned on the codeplug system in slot bits 4-6, whose network ID and model hash to bits 0-3. Written by the radio core when a stun is taken or revived. 0 (an older record) = not stunned. Cleared by a factory reset |
 | Tier III kill | Page 1, appended after `t3_stun`: `t3_kill`, bit 0 (`SETTINGS_T3_KILLED`) a kill taken ([dmr-trunking.md](dmr-trunking.md) 7.9): no DMR at all, in any build, until a factory reset clears it; bits 1-7 reserved (0). Then `reserved10[2]` (0). 0 (an older record) = not killed |
+| signaling tones | Page 1, appended after `reserved10`, then `reserved11[2]` (0) (a record from before is shorter and reads these as 0): `sig_dmr[3]` and `sig_fm[3]`, where the start, end and idle tone sound in DMR and in FM (0 default, 1 off, 2 speaker, 3 on air, 4 speaker + air). 0, as an older record reads, is the radio's own tone. The chains of steps are not here: each event's is its codeplug record (`CODEPLUG_KEY_SIG_BEGIN` + event, [codeplug-settings.md](codeplug-settings.md) 3.3), read at start and on every change, so `settings_t` copies on task stacks stay small. `radio_settings_t.sig_dmr`, `sig_fm`, `sig_hz`, `sig_ms` ([radio-features.md](radio-features.md) 4.3) |
 | crash report | packed into spare bits, so an older record reads as off with no target: the mode (0 off, 1 ask, 2 send at once) in `accent` bits 4-5; the target's codeplug contact number (0 none, else 1..1024, 11 bits) bits 0-5 in `theme` bits 2-7 and bits 6-10 in `updown_home` bits 2-6. `theme` and `updown_home` keep their value in bits 0-1; read and write them through `settings_theme` / `settings_updown_home` and `settings_crash_*` (`settings.h`). Firmware from before reads a `theme` or `updown_home` with these bits as out of range: the dark theme and Up/Down = channel ([crash-log.md](crash-log.md) 5.2) |
 
 All of these are still layout 1: they were appended before any firmware with the settings store shipped. Page 0
@@ -193,7 +195,8 @@ second confirmation and is not offered.
 
 ### 3.1 Privacy key slots (the hook for DMR basic privacy)
 
-The key store for `core/dmr/dmrPrivacy.c` (`dmr-voice.md` 5). Four slots, each a key value (`privacy_key[i]`,
+The key store for `core/dmr/dmrPrivacy.c` (`dmr-voice.md` 5). System traffic keys use the codeplug settings area
+([channel-modes.md](channel-modes.md) 5.4). Four slots, each a key value (`privacy_key[i]`,
 u32: 16 bits are used today by Motorola and Anytone basic privacy, and the slot is wide enough for a 32-bit key
 later) and a type (`privacy_type[i]`, `dmrPrivacyType_t`). `privacy_active` picks the slot in use radio-wide: 1 to
 4, or 0 for privacy off. Turning privacy off keeps the key in its slot.

@@ -59,6 +59,20 @@ static inline uint32_t hal_flash_map_end(const hal_flash_map_t *m, uint32_t eras
 	return end;
 }
 
+// The map a chip of size bytes gets: the board's map when the chip holds it, else its map for a smaller part when that
+// fits, else none (nothing is stored). Either may be NULL
+static inline const hal_flash_map_t *hal_flash_map_for(const hal_flash_map_t *map, const hal_flash_map_t *small,
+						       uint32_t size, uint32_t erase_size)
+{
+	if (map != NULL && hal_flash_map_end(map, erase_size) <= size) {
+		return map;
+	}
+	if (small != NULL && hal_flash_map_end(small, erase_size) <= size) {
+		return small;
+	}
+	return NULL;
+}
+
 typedef struct {
 	bool (*init)(void);
 	uint32_t size;		// bytes, filled in by init on boards that probe it
@@ -73,6 +87,9 @@ typedef struct {
 	// journaled erase and program
 	bool (*replace)(uint32_t addr, const void *data);
 	const hal_flash_map_t *map;	// NULL: no areas for the core (nothing is stored)
+	// Optional (NULL: not known): the chip's ID as init read it, manufacturer << 16 | device (SPI NOR: memory type << 8
+	// | capacity code; SPI NAND: the device byte), 0 when nothing answered. No bus transfer: the support info reads it
+	uint32_t (*jedec)(void);
 } hal_flash_t;
 
 #endif

@@ -12,6 +12,8 @@
 #include "radio/battery.h"
 #include "radio/morse.h"
 #include "radio/radio_cwid.h"
+#include "radio/beep.h"	// beep_seg_t
+#include "radio/sigtone.h"	// SIG_STEPS
 #if CONFIG_APRS
 #include "aprs/aprs.h"
 #endif
@@ -306,6 +308,7 @@ typedef struct {
 	uint32_t deny_led_ms;		// a TX deny: red, green, red, green, red, green from here
 	bool deny_led;
 	bool deny_rx;			// FM: PTT refused as busy over a reception, which plays on while PTT is held
+	int8_t rx_open_out;		// last board.radio->rx_open(), -1 = not yet (here: fills the padding before wake_led_ms)
 	uint32_t wake_led_ms;		// a repeater wake-up burst went out here: red for RADIO_LED_WAKE_MS
 	bool wake_led;
 	uint8_t wake_seen;		// dmr_call_view_t.wake_sent last seen
@@ -372,7 +375,12 @@ typedef struct {
 	uint32_t burst_ms;		// start of the side-key burst
 	bool burst_keyed;		// the 1750 Hz burst keyed the transmitter (not PTT)
 	uint32_t burst_end_ms;		// the burst ends by itself at this time (RREQ_TONE_BURST arg2), 0 = no limit
-	uint32_t roger_ms;		// roger beep start, 0 = none
+	uint32_t roger_ms;		// start of the roger beep's current step (the end tone's, sigtone.h), 0 = none
+#if CONFIG_SIG_TONES
+	uint8_t roger_n, roger_i;	// its steps and the one sounding
+	bool roger_lead;		// the tone running is the start tone on air (PTT is down): it ends with the microphone live
+	beep_seg_t roger_seg[SIG_STEPS];
+#endif
 #endif
 #if CONFIG_DTMF
 	bool dtmf_held;			// the key of the digit sounding (view.dtmf) is still down
@@ -405,6 +413,10 @@ typedef struct {
 	uint8_t dmr_wake_admits;	// the stack's wake_admits at the last tick (the permit tone for a short press)
 	uint8_t dmr_permit_seq;		// the stack's permit_seq at the last tick (the permit tone before keying)
 	uint8_t dmr_prev_state;		// radio_dmr_state_t at the last tick (beeps on changes)
+#if CONFIG_SIG_TONES
+	bool dmr_end_wait;		// our end tone waits for the audio path to open after the transmission
+	uint32_t dmr_end_ms;		// when it started waiting
+#endif
 	bool codec;			// the vocoder is present
 	bool dmr_running;		// the call stack has the modem
 	bool dmr_killed;		// settings t3_kill: no DMR at all (dmr-trunking.md 7.9)
@@ -452,6 +464,7 @@ typedef struct {
 	uint16_t group_hang_ms, private_hang_ms;	// codeplug hang times, 0 = the stack's default reply window
 	uint32_t hs_rx_hz, hs_tx_hz;	// hotspot frequencies
 	uint8_t hs_power;		// hotspot board power level
+	bool hs_power_due;		// hotspot: hs_power came while the modem transmitted; keyed again at its end
 	bool hs_carrier;		// hotspot: the receiver hears a carrier
 #if RADIO_SM_CW
 	uint8_t cw_phase;		// a CW ID: CW_* in radio_sm.c, 0 = not keying
@@ -472,6 +485,7 @@ typedef struct {
 	bool t3_pending;		// a trunked channel was selected: start its system (t3s) at the next t3_tick
 	bool t3_tagged;			// the channel is a trunked one (channel_t.kind)
 	bool t3_ch_rx;			// and receive only (its tag): the system runs listen only from it
+	bool t3_monitor_set;		// the loaded system's own T3_OPT_MONITOR; digital monitor adds it while on (t3_monitor)
 	uint8_t t3_kv;			// codeplug_kv_serial() when t3s was loaded from the codeplug
 	uint8_t t3_fb;			// fallback (dmr-trunking.md 12): 0 off, 1 on the fallback channel, 2 probing
 	uint16_t t3_fb_number;		// the fallback channel, 0: none
@@ -479,7 +493,7 @@ typedef struct {
 	uint32_t t3_probe_ms;		// on the fallback channel: when to look next; probing: until when
 	channel_t t3_fb_ch;
 	bool t3_both;			// on a control channel: both slots
-	bool t3_ptt_wait;		// PTT held on the TSCC: waiting for our grant
+	bool t3_ptt_wait;		// waiting for our grant after a PTT-initiated call request
 	bool t3_als_keyed;		// keyed by an Ambient Listening call (6.6.2.6), not by the user
 	uint32_t t3_als_quiet_ms;	// unkeyed at T_ALS: the call ends once the terminator is out
 	uint8_t t3_stun_kept;		// settings t3_stun as last written for the system in use (0: not stunned)

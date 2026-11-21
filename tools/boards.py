@@ -152,6 +152,7 @@ BOARD_SCHEMA = {
     "also": _req(STR_LIST),
     "kind": _req(KINDS),
     "order": _req(int),		# where the radio appears in the site's lists; the lowest is the home page's radio
+    "aprs_tocall": _req(str),	# the APRS tocall's sixth character, APRDF? (docs/spec/aprs.md 4.2): 1-9, A-Z, unique
     "part_of": _opt(str),
     # other bodies the same board ships in that look too different to share its picture: each is its own card on the
     # site, drawn in site/static/img/radios/src/<id>-<look id>.svg (the site build refuses a missing one), and links to
@@ -457,15 +458,19 @@ def board_t_names(board_dir):
 
 def flash_map(board_dir):
     """The FLASH_MAP_FIELDS of the board's hal_flash_map_t definition, {field: address}. A board has one; a second one
-    that disagrees is an error."""
+    that disagrees is an error. A map the board gives its driver for a smaller chip (`.small_map = &name`) isn't it."""
+    sources = list(_c_sources(board_dir))
+    small = {n for _, text in sources for n in re.findall(r"\.small_map\s*=\s*&\s*(\w+)", text)}
     out, where = {}, None
-    for f, text in _c_sources(board_dir):
-        for m in re.finditer(r"\bhal_flash_map_t\s+\w+\s*=\s*\{", text):
+    for f, text in sources:
+        for m in re.finditer(r"\bhal_flash_map_t\s+(\w+)\s*=\s*\{", text):
+            if m.group(1) in small:
+                continue
             found = {k: int(v, 0) for k, v in re.findall(r"\.(\w+)\s*=\s*(0[xX][0-9A-Fa-f]+|\d+)[uUlL]*",
                                                         _braced(text, m.end())) if k in FLASH_MAP_FIELDS}
             if where is not None and found != out:
-                raise RegistryError("%s: hal_flash_map_t in %s and %s differ" % (os.path.relpath(board_dir, ROOT),
-                                                                                 where, f))
+                d = board_dir if isinstance(board_dir, str) else board_dir[0]
+                raise RegistryError("%s: hal_flash_map_t in %s and %s differ" % (os.path.relpath(d, ROOT), where, f))
             out, where = found, f
     return out
 
@@ -576,6 +581,13 @@ def not_written_problems(bid, b):
             out.append("boards/%s: %s is in both BOARD_UNSUPPORTED and BOARD_NOT_WRITTEN: UNSUPPORTED only when the "
                        "hardware can't do it (docs/build-config.md)" % (bid, s))
     return out
+
+
+def listed_off_problems(bid, listed, built):
+    """A switch in BOARD_UNSUPPORTED or BOARD_NOT_WRITTEN (listed) that the default build still builds (built: switch ->
+    "y"/"n"): the list alone doesn't turn it off, and the site then shows the feature as there."""
+    return ["boards/%s: %s is in BOARD_UNSUPPORTED or BOARD_NOT_WRITTEN but built by default: add CONFIG_%s ?= n "
+            "next to the config.mk line that lists it" % (bid, s, s) for s in listed if built.get(s) == "y"]
 
 
 def default_off_problems(bid, b, built):
@@ -1007,7 +1019,7 @@ def hardware_switches(root=ROOT):
 def hardware_problems(bid, unsupported, unconfirmed, built, hw):
     """A board's hardware switches that read "off by default": each must be built (built: switch -> "y"/"n"), listed in
     BOARD_UNSUPPORTED or BOARD_NOT_WRITTEN (unsupported: both, with their reasons), or, while the fact is unknown, in
-    board.toml [hardware] unconfirmed. One in either list must also be off by default."""
+    board.toml [hardware] unconfirmed. That one in either list is also off by default is listed_off_problems' check."""
     out = []
     for s, what in sorted(hw.items()):
         on, gone = built.get(s) == "y", s in unsupported
@@ -1015,9 +1027,6 @@ def hardware_problems(bid, unsupported, unconfirmed, built, hw):
             if on or gone:
                 out.append("boards/%s/board.toml: hardware.unconfirmed %s, but the board %s: drop the entry"
                            % (bid, s, "builds it" if on else "lists it in BOARD_UNSUPPORTED or BOARD_NOT_WRITTEN"))
-        elif on and gone:
-            out.append("boards/%s: %s is in BOARD_UNSUPPORTED or BOARD_NOT_WRITTEN (it needs %s) but built by default: "
-                       "add CONFIG_%s ?= n to its config.mk" % (bid, s, what, s))
         elif not on and not gone:
             out.append("boards/%s: %s needs %s and is off by default: build it (config.mk CONFIG_%s ?= y) if the "
                        "radio has it and the code is written; BOARD_NOT_WRITTEN += %s  # <what isn't written> if "
@@ -1141,7 +1150,7 @@ def check(root=ROOT):
     except RegistryError as e:
         return [str(e)]
     hw = hardware_switches(root)
-    stub_ids, orders = {}, {}
+    stub_ids, orders, tocalls = {}, {}, {}
     classes = gallery_classes(root)
     geoms = gallery_geoms(root) or {}
     for bid, b in boards.items():
@@ -1155,21 +1164,20 @@ def check(root=ROOT):
                 problems.append("boards/%s/config.mk: BOARD_UNSUPPORTED %s has no reason: one switch a line, "
                                 "BOARD_UNSUPPORTED += %s  # <reason>" % (bid, s, s))
         problems += not_written_problems(bid, b)
-        if b.default_off:
+        # not written yet counts as left off on purpose, as unsupported does
+        listed = {**b.unsupported, **b.not_written}
+        names = sorted(set(listed) | set(b.default_off) | set(hw))
+        if names:
             try:
-                problems += default_off_problems(bid, b, {k[len("CONFIG_"):]: v for k, v in make_vars(
-                    root, bid, ["CONFIG_" + s for s in b.default_off]).items()})
+                built = {k[len("CONFIG_"):]: v for k, v in make_vars(root, bid, ["CONFIG_" + s for s in names]).items()}
             except RegistryError as e:
                 problems.append(str(e))
-        if hw:
-            try:
-                built = {s: v for s, v in ((k[len("CONFIG_"):], v) for k, v in
-                                           make_vars(root, bid, ["CONFIG_" + s for s in hw]).items())}
-                # not written yet counts as left off on purpose, as unsupported does
-                problems += hardware_problems(bid, {**b.unsupported, **b.not_written},
-                                              d["hardware"].get("unconfirmed", {}), built, hw)
-            except RegistryError as e:
-                problems.append(str(e))
+            else:
+                problems += listed_off_problems(bid, listed, built)
+                if b.default_off:
+                    problems += default_off_problems(bid, b, built)
+                if hw:
+                    problems += hardware_problems(bid, listed, d["hardware"].get("unconfirmed", {}), built, hw)
         for k, p in d["docs"].items():
             if not os.path.isfile(os.path.join(root, p)):
                 bad("docs.%s %s doesn't exist" % (k, p))
@@ -1198,6 +1206,13 @@ def check(root=ROOT):
         if d["order"] in orders:
             bad("order %d is also the %s's" % (d["order"], orders[d["order"]]))
         orders.setdefault(d["order"], bid)
+        # "0" is the host tests' (no radio); the registry lists each character with its radio, so one never moves
+        if not re.fullmatch(r"[1-9A-Z]", d["aprs_tocall"]):
+            bad("aprs_tocall %r: one character, 1-9 or A-Z" % d["aprs_tocall"])
+        elif d["aprs_tocall"] in tocalls:
+            bad("aprs_tocall %r is also the %s's" % (d["aprs_tocall"], tocalls[d["aprs_tocall"]]))
+        else:
+            tocalls[d["aprs_tocall"]] = bid
         fm = b.flash_map
         if b.codeplug() is None:
             bad("no hal_flash_map_t with openfw_eeprom and openfw_end in boards/%s/*.c" % bid)
@@ -1757,6 +1772,12 @@ def self_test():
     ok(openfw_bases("-DX=1 -DCODEPLUG_OPENFW_EEPROM_BASE=0x700000u -DCODEPLUG_OPENFW_FLASH_BASE=0x720000u") ==
        (0x700000, 0x720000) and openfw_bases("-DX=1") == (0, 0x20000) and openfw_bases(None) == (0, 0x20000),
        "openfw_bases: board.mk's, else the STM32 defaults")
+    with open(os.path.join(tmpc, "flash3.c"), "w", encoding="utf-8") as f:
+        f.write("static const hal_flash_map_t small = { .openfw_eeprom = 0, .openfw_end = 0x100000 };\n"
+                "static const cfg_t cfg = { .map = &fmap, .small_map = &small };\n")
+    ok(flash_map(tmpc) == {"openfw_eeprom": 0x700000, "openfw_end": 0x800000, "staging_addr": 0},
+       "flash_map: a map for a smaller chip (.small_map) is not the board's map")
+    os.remove(os.path.join(tmpc, "flash3.c"))
     with open(os.path.join(tmpc, "flash2.c"), "w", encoding="utf-8") as f:
         f.write("const hal_flash_map_t m2 = { .openfw_eeprom = 0x600000 };\n")
     try:
@@ -1827,6 +1848,8 @@ def self_test():
     probs = default_off_problems("t", fake, {"A": "n", "B": "n", "C": "n", "D": "y"})
     ok(len(probs) == 3 and "B has no reason" in probs[0] and "C is in" in probs[1] and "D is in" in probs[2],
        "default_off_problems: a reason, choosable, off by default")
+    probs = listed_off_problems("t", ["A", "B", "C"], {"A": "n", "B": "y"})
+    ok(len(probs) == 1 and "B is in" in probs[0], "listed_off_problems: a listed switch built by default")
     shutil.rmtree(tmpm)
     for bad, what in (({"hil": {"battery_mv": "5V"}}, "a [hil] value of the wrong type"),
                       ({"hil": {"no_such": 1}}, "an unknown [hil] key"),
@@ -1885,8 +1908,8 @@ def self_test():
        "hardware switches: unconfirmed on a switch the board builds fails")
     ok(len(hp("x", {}, {"FONT_BIG": "?"}, {"VIBRATE": "y", "NAND_STORAGE": "y"}, hw)) == 1,
        "hardware switches: unconfirmed on a switch that isn't a hardware switch fails")
-    ok(len(hp("x", {"NAND_STORAGE": "NOR"}, {}, {"VIBRATE": "y", "NAND_STORAGE": "y"}, hw)) == 1,
-       "hardware switches: in BOARD_UNSUPPORTED but built by default fails")
+    ok(len(listed_off_problems("x", {"NAND_STORAGE": "NOR"}, {"VIBRATE": "y", "NAND_STORAGE": "y"})) == 1,
+       "hardware switches: in BOARD_UNSUPPORTED but built by default fails (listed_off_problems)")
     ok(hp("x", {"NAND_STORAGE": "the driver isn't written"}, {}, {"VIBRATE": "y", "NAND_STORAGE": "n"}, hw) == [],
        "hardware switches: one in BOARD_NOT_WRITTEN (check() passes both lists) passes off by default")
 
@@ -2023,6 +2046,10 @@ def self_test():
         two = board_dirs(tmp)[1]
         other = _tomllib().load(open(os.path.join(tmp, "boards", two, "board.toml"), "rb"))["order"]
         broken(re.sub(r"(?m)^order = .*$", "order = %d" % other, good), "an order another board has", "also the")
+        other = _tomllib().load(open(os.path.join(tmp, "boards", two, "board.toml"), "rb"))["aprs_tocall"]
+        broken(re.sub(r"(?m)^aprs_tocall = .*$", 'aprs_tocall = "%s"' % other, good), "an APRS tocall another board has",
+               "also the")
+        broken(re.sub(r"(?m)^aprs_tocall = .*$", 'aprs_tocall = "0"', good), "the host tests' APRS tocall", "1-9 or A-Z")
         fm_c = [os.path.join(tmp, "boards", one, f) for f, text in _c_sources(os.path.join(tmp, "boards", one))
                 if "hal_flash_map_t" in text]
         fm_good = open(fm_c[0], encoding="utf-8").read()

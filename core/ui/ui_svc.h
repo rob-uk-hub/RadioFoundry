@@ -167,6 +167,8 @@ bool ui_svc_roam(uint8_t cmd);			// radio_roam_cmd_t: zone on / off, roam now, l
 // system is set up
 int ui_svc_t3_channel(uint16_t num, const channel_t *ch, bool *usable);
 bool ui_svc_t3_name(uint8_t n, char *name);	// system n's name (CODEPLUG_NAME_LEN + 1); false: no such system
+void ui_svc_t3_cancel(void);
+void ui_svc_t3_reject(void);
 void ui_svc_t3_poll(uint32_t id);	// poll an MS for its short data (radio_req_t3_poll)
 // CONFIG_DMR_TRUNK_GW (else no-ops): the digits ("0-9*#", up to 16) the next call through a dialing gateway sends,
 // and whether src is a dialing gateway on the system in use (false: no, or not this build); out: the caller's number
@@ -209,6 +211,7 @@ void ui_svc_msg_read(uint16_t i);		// mark read
 bool ui_svc_msg_delete(uint16_t i);
 // Queue a text message; the result comes back as a ui_notify() event
 bool ui_svc_msg_send(uint32_t dst, bool group, const char *text);
+bool ui_svc_msg_reply(uint16_t i, const char *text);
 bool ui_svc_radio_check(uint32_t id);
 bool ui_svc_call_alert(uint32_t id);
 // ARS registration with the presence server (Settings > Connections > Data services), as dmrArsState_t
@@ -229,6 +232,9 @@ typedef struct {
 	uint32_t utc_hms;	// hhmmss, 0xFFFFFFFF unknown
 } ui_position_t;
 bool ui_svc_position(ui_position_t *out);	// false: no GPS on this radio (or off)
+// The radio's GPS for the status strip: none, or one with Settings > Location > GPS off or on, however it was set
+enum { UI_GPS_POWER_NONE, UI_GPS_POWER_OFF, UI_GPS_POWER_ON };
+uint8_t ui_svc_gps_power(void);
 // One satellite for the GPS screen's sky plot and signal bars
 enum { UI_GNSS_GPS, UI_GNSS_GLONASS, UI_GNSS_GALILEO, UI_GNSS_BEIDOU, UI_GNSS_QZSS, UI_GNSS_COUNT };
 typedef struct {
@@ -412,8 +418,22 @@ typedef enum {
 	// the emergency tone for an alert heard (dmr_emergency_settings_t.rx_tone, CONFIG_DMR_EMERGENCY)
 	UI_SET_SCAN_TONE,
 	UI_SET_EMERGENCY_TONE,
+	// Signaling tones (Settings > Signaling tones; radio_settings_t.sig_dmr / sig_fm / sig_hz / sig_ms,
+	// core/radio/sigtone.h): per event (start of a transmission, its end, a reception's end) where it sounds in DMR and
+	// in FM (sig_out_t), then the event's chain of ten steps, a frequency in Hz and a length in ms (0 ends it). Each
+	// group is the events in order: UI_SET_SIG_DMR + sig_event_t, UI_SET_SIG_HZ + 10 * event + step
+	UI_SET_SIG_DMR, UI_SET_SIG_DMR_LAST = UI_SET_SIG_DMR + 2,
+	UI_SET_SIG_FM, UI_SET_SIG_FM_LAST = UI_SET_SIG_FM + 2,
+	UI_SET_SIG_HZ, UI_SET_SIG_HZ_LAST = UI_SET_SIG_HZ + 29,
+	UI_SET_SIG_MS, UI_SET_SIG_MS_LAST = UI_SET_SIG_MS + 29,
+	// One step of a chain, set whole (its frequency and length in one write of the settings area): the value is
+	// UI_SIG_STEP(event, step, Hz, ms). Write only
+	UI_SET_SIG_STEP,
 	UI_SET_COUNT
 } ui_setting_t;
+
+// The value of UI_SET_SIG_STEP: the frequency in bits 0-11, the length in 10 ms units in 12-18, the step in 19-22, the event in 23-24
+#define UI_SIG_STEP(ev, k, hz, ms)	((int32_t)(((hz) & 0xFFFu) | ((((ms) / 10u) & 0x7Fu) << 12) | (((k) & 15u) << 19) | (((ev) & 3u) << 23)))
 
 // UI_SET_ACCENT values: the theme's own highlight (blue), or one of seven. Color displays only
 enum {
