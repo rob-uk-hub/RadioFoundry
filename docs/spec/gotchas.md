@@ -208,7 +208,11 @@ is unmasked, but a line still high after its request was taken never interrupts 
 and rises. A modem request whose cause stays set (the system interrupt handler stops after four passes with causes
 still listed) leaves its source silent for good. A dead timeslot interrupt means no repeater wake-up is ever sent. Rule: drop every pending modem request at each receiver restart and after a stalled
 transmission; drop a system request pending for 50 ms with no handler run; count both and keep the first one's PIC
-state (`modem-hrc7000.md` 3.3). Radios: the HR_C7000 boards; one report.
+state (`modem-hrc7000.md` 3.3). An air session (P25, NXDN) halts the slot engine and that check with it, so a lost
+FM copy request there, or the modem's system source left masked at the PIC, leaves receive deaf until the session
+closes (suspected in #923; the masked source measured so, the lost request not reproduced): the session's poll sets
+the copy up again and unmasks the modem sources after 200 ms with no half (`airp.copy_restarts`, the first one's PIC
+words in `airp.copy_lost_regs`). Radios: the HR_C7000 boards; one report.
 
 **2.10 A receiver restart in the middle of a burst.**
 Symptom: a direct answer in the other timeslot, right after our terminator (30 ms after its start), was lost: decoded but with BS sync, its timeslot
@@ -346,6 +350,15 @@ every 30 ms; a repeater's continuous carrier showed nothing. Sweeps near sensiti
 usually tuned, never saw it. Rule: the AT1846S DMR mode table writes 0x32 bits 2:0 clear (`drivers/rf/at1846s`);
 judge a receiver setting at strong simplex levels as well (`dmr-voice.md` 7.1). Radios: AT1846S boards. Test:
 `test_dmr_audio_rx_strong` (tests/hil).
+
+**3.19 Leave no FM sub-audio on in DMR.** Symptom: after a visit to an FM channel with a receive CTCSS tone, every DMR
+over counted as sent (tx_voice reached, call.tx_calls + 1) and the SDR bench decoded none of the bursts. An FM channel
+without a tone left DMR working. Cause: the FD6818's sub-audio register 0x51 still held the FM channel's receive tone
+(0x9045), and its bit 15 also turns the chip's sub-audio transmitter on, so the tone rode on the 4FSK. Rule: the RF
+chip driver turns the sub-audio off when it enters DMR (`fd6818_set_mode`; `fd6818sh_dmr_mode` does the same), not
+each board's tune path; a radio's own counters can't show a transmission that doesn't decode, so a HIL check of a TX
+path asserts what the bench heard. Radios: boards with the FD6818 as the transceiver. Test: `fd6818Test`
+(`test_dmr_tone_off`, tests/host), `test_dmr_tx_after_toned_fm_channel` (tests/hil).
 
 ## 4. AMBE codec calling
 
