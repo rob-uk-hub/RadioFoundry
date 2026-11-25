@@ -6,7 +6,7 @@
 //
 // Script tokens (separated by spaces):
 //   up down left right ok back quick ctx 0..9 tt mon user1..user4 emerg enc+ enc-   a short press (counted);
-//   powerkey zone+ zone- scankey lockkey cbkey homekey dualkey abkey: what a reassigned side key sends
+//   powerkey zone+ zone- scankey skipkey monkey lockkey cbkey homekey dualkey abkey: what a reassigned side key sends
 //   long:<key>          a long press (counted)
 //   ptt / ptt:<ms>      PTT pressed for 1 s / ms (counted); pttdown ... pttup holds it
 //   mondown ... monup   the monitor key held (FM: the squelch held open)
@@ -49,6 +49,9 @@
 //   autolock:<s>        Settings > Keys > Auto lock: s seconds, 0 off
 //   battery:<pct>       the battery reads pct; offfailed: auto power off couldn't switch off
 //   foreign             the codeplug is another firmware's: a channel write asks first (codeplug-foreign)
+//   aeskeys             system 3 is a DMR AES one holding traffic keys 0 and 7 (the channel editor's AES key row)
+//   datadeny:<d>[,<p>]  why the channel can't send data now: view.data_deny d, packet_deny p (default d), each none,
+//                       aes_key, not_dmr or data_encrypted
 //   nobattery           the board has no battery (CAP_NO_BATTERY), until the next reset
 //   variant             the board suspects the image is for another hardware version, until the next reset
 //   supply:<mv>         no battery, and the board measures its DC input, which reads mv (hal_power_t.supply_mv)
@@ -2593,6 +2596,7 @@ static void step(void)
 		ui_notify(&ev);
 	}
 	view.hotspot = hotspot_on;
+	view.hs_power = view.power;	// as the radio core with the host's RF level at its default (FF)
 	if (ui_app_tick(&view, now_ms))
 		ui_app_draw();
 	if (tick_hook != NULL)
@@ -2604,6 +2608,30 @@ static void advance(uint32_t ms)
 	for (uint32_t t = 0; t < ms; t += TICK_MS)
 		step();
 }
+
+#if CONFIG_DMR_AES
+static bool sim_aes_keys;	// aeskeys
+
+// The codeplug's AES keys as ui_svc_storage.c steps them: system 3 (index 2), PI key IDs 0 and 7, then none
+void ui_svc_next_aes_key(channel_t *c)
+{
+	static const uint16_t refs[] = { 1, 8 };	// key ID + 1
+	unsigned i = 0;
+
+	if (c->kind == CODEPLUG_KIND_DMR_AES)
+		while (i < 2 && refs[i] <= c->aes_ref)
+			i++;
+	if (!sim_aes_keys || i == 2) {
+		c->kind = CODEPLUG_KIND_NONE;
+		c->system = CODEPLUG_SYSTEM_NONE;
+		c->aes_ref = 0;
+		return;
+	}
+	c->kind = CODEPLUG_KIND_DMR_AES;
+	c->system = 2;
+	c->aes_ref = refs[i];
+}
+#endif
 
 void sim_reset(const sim_geom_t *g, sim_map_t map)
 {
@@ -2643,6 +2671,9 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
 	ui_layout_init();
 	memset(&view, 0, sizeof view);
 	memset(&sim_rec, 0, sizeof sim_rec);
+#if CONFIG_DMR_AES
+	sim_aes_keys = false;
+#endif
 #if CONFIG_SATELLITE_TLE
 	sim_satellite_predicting = false;
 	sim_satellite_no_passes = false;
@@ -2795,6 +2826,8 @@ static const struct { const char *name; uint8_t action; } keys[] = {
 	{ "dualkey", ACT_DUAL_WATCH }, { "abkey", ACT_AB },	// dual watch's side key functions
 	{ "vfokey", ACT_VFO_TOGGLE },		// a VFO/MR key in the board's key map, or a side key set to VFO/Channel
 	{ "labelkey", ACT_TALK_LABEL },
+	{ "skipkey", ACT_SCAN_SKIP },
+	{ "monkey", ACT_MONITOR_TOGGLE },
 	{ "volkey", ACT_VOLUME },
 	{ "0", ACT_DIGIT_0 }, { "1", ACT_DIGIT_1 }, { "2", ACT_DIGIT_2 }, { "3", ACT_DIGIT_3 }, { "4", ACT_DIGIT_4 },
 	{ "5", ACT_DIGIT_5 }, { "6", ACT_DIGIT_6 }, { "7", ACT_DIGIT_7 }, { "8", ACT_DIGIT_8 }, { "9", ACT_DIGIT_9 },
@@ -2803,7 +2836,8 @@ static const struct { const char *name; uint8_t action; } keys[] = {
 static bool on_map(uint8_t action, bool lng)
 {
 	if ((action >= ACT_POWER && action <= ACT_VOLUME) || action == ACT_VFO_TOGGLE || action == ACT_DUAL_WATCH ||
-	    action == ACT_AB || action == ACT_TALK_TARGET || action == ACT_TALK_LABEL)
+	    action == ACT_AB || action == ACT_TALK_TARGET || action == ACT_TALK_LABEL ||
+	    action == ACT_SCAN_SKIP || action == ACT_MONITOR_TOGGLE)
 		// any side key can be set to send these; the few-key map has none, but a radio with side keys and no QUICK key
 		// is the case the key lock needs on it
 		return board.side_key_count != 0 || cur_map == SIM_MAP_F;
@@ -2932,6 +2966,7 @@ static bool check(const char *kv, char *err, size_t len)
 	else if (strcmp(key, "temporary") == 0) snprintf(got, sizeof got, "%u", view.temporary);
 	else if (strcmp(key, "writes") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.codeplug_writes);
 	else if (strcmp(key, "checks") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.radio_checks);
+	else if (strcmp(key, "alerts") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.call_alerts);
 	else if (strcmp(key, "sent") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.messages_sent);
 	else if (strcmp(key, "text") == 0) snprintf(got, sizeof got, "%s", sim_rec.last_text);
 	else if (strcmp(key, "aprs_to") == 0) snprintf(got, sizeof got, "%s", sim_rec.last_aprs_to);
@@ -3667,6 +3702,38 @@ static bool run_token(char *t, char *err, size_t len)
 		ev.kind = UI_EV_POWER_OFF_FAILED;
 		ui_notify(&ev);
 		advance(200);
+		return true;
+	}
+#if CONFIG_DMR_AES
+	if (strcmp(t, "aeskeys") == 0) {
+		sim_aes_keys = true;
+		return true;
+	}
+#endif
+	if (strcmp(t, "datadeny") == 0 && arg != NULL) {
+		static const struct { const char *name; uint8_t code; } codes[] = {
+			{ "none", TXDENY_NONE }, { "aes_key", TXDENY_AES_KEY }, { "not_dmr", TXDENY_NOT_DMR },
+			{ "data_encrypted", TXDENY_DATA_ENCRYPTED },
+		};
+		char *packet = strchr(arg, ',');
+		if (packet != NULL)
+			*packet++ = 0;
+		bool known = false;
+		for (size_t i = 0; i < sizeof codes / sizeof codes[0]; i++) {
+			if (strcmp(arg, codes[i].name) == 0) {
+				view.data_deny = view.packet_deny = codes[i].code;
+				known = true;
+			}
+		}
+		for (size_t i = 0; packet != NULL && i < sizeof codes / sizeof codes[0]; i++) {
+			if (strcmp(packet, codes[i].name) == 0)
+				view.packet_deny = codes[i].code;
+		}
+		if (!known) {
+			snprintf(err, len, "unknown datadeny %s", arg);
+			return false;
+		}
+		changed();
 		return true;
 	}
 	if (strcmp(t, "foreign") == 0) {	// the codeplug is another firmware's: the first edit asks
